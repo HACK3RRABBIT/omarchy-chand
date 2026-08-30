@@ -45,7 +45,7 @@ Panel {
   property string surface: "watchlist"
   property string selectedKey: ""
   property int cursor: 0
-  property string range: (cfg.range || "1m")
+  property string range: (cfg.range || "1y")
 
   // detail fetch state (one-shot; history file is appended by the poller too)
   property var detailState: null
@@ -239,12 +239,48 @@ Panel {
       onStreamFinished: {
         var raw = String(text || "").trim()
         if (!raw) return
-        try { root.detailHistory = JSON.parse(raw) } catch (e) {}
+        try {
+          var parsed = JSON.parse(raw)
+          root.detailHistory = parsed
+          // Cold cache (first open of a brand-new key): kick a background
+          // warm; when it lands it re-reads this chart from cache.
+          if (parsed && parsed.summary && parsed.summary.points === 0)
+            root.warmCharts()
+        } catch (e) {}
       }
     }
   }
 
   property var detailHistory: null
+
+  // Background chart warmer. Every 5 minutes it rebuilds every chart range
+  // for every watchlist key into ~/.cache/omarchy-chand/charts, so opening a
+  // detail chart is an instant cache read (fetch-chand history) — never a
+  // blocking network fetch. Runs detached from the visible poller.
+  Process {
+    id: warmer
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        // A warm pass just landed; re-read the open chart from the
+        // now-fresh cache (covers the cold-miss kick below too).
+        if (root.surface === "detail" && root.selectedKey)
+          root.fetchDetail(root.selectedKey, root.range)
+      }
+    }
+  }
+  function warmCharts() {
+    var keys = []
+    var syms = Array.isArray(cfg.symbols) ? cfg.symbols : []
+    for (var i = 0; i < syms.length; i++) keys.push(syms[i])
+    if (cfg.primary && keys.indexOf(cfg.primary) === -1) keys.push(cfg.primary)
+    if (root.surface === "detail" && root.selectedKey && keys.indexOf(root.selectedKey) === -1)
+      keys.push(root.selectedKey)
+    if (keys.length === 0 || warmer.running) return
+    warmer.command = [root.fetchChand, "warm"].concat(keys)
+    warmer.running = true
+  }
 
   Timer {
     id: refreshTimer
@@ -252,7 +288,10 @@ Panel {
     running: true
     repeat: true
     triggeredOnStart: true
-    onTriggered: root.refresh()
+    onTriggered: {
+      root.refresh()
+      root.warmCharts()
+    }
   }
 
   // ================= UI =================
@@ -407,6 +446,10 @@ Panel {
 
                 Row {
                   id: rowInner
+                  // Stack above the row-level MouseArea (a later-declared
+                  // sibling that covers the whole row): without this, the ✕
+                  // click never reaches removeBtn and opens Detail instead.
+                  z: 1
                   anchors.left: parent.left
                   anchors.leftMargin: Style.space(10)
                   anchors.verticalCenter: parent.verticalCenter
@@ -549,41 +592,40 @@ Panel {
                 }
               }
             }
-            // Δ% + Δ T for the selected range. 1D uses the live TGJU d/dp;
-            // longer ranges use the history summary (last - first).
+            // Δ% for the selected range: first price -> current price from
+            // the (cache-warmed) chart summary. Falls back to the live 24h
+            // change only while no series exists yet.
+            // NOTE: reference dSt directly here — inside a property binding
+            // of this Column, `parent` is the Column's VISUAL parent, which
+            // has no dSt (that made Δ% show 0 for every asset/range).
             readonly property real dPct: {
-              var s = parent.dSt
-              var useLive = (root.range === "1d") && s && s.ok
-              if (useLive) return Number(s.change_pct) || 0
-              if (root.detailHistory && root.detailHistory.summary && root.detailHistory.summary.points >= 2 && s && s.ok) {
-                var first = root.detailHistory.summary.low === null ? null : root.detailHistory.summary
-                var delta = root.detailHistory.summary.range_delta
-                var base = (root.detailHistory.series && root.detailHistory.series.length)
-                  ? root.detailHistory.series[0].toman : 0
-                return base ? (delta / base * 100) : 0
-              }
-              return s && s.ok ? (Number(s.change_pct) || 0) : 0
+              var h = root.detailHistory
+              if (h && h.summary && h.summary.points >= 2 && h.summary.first_price)
+                return h.summary.range_delta / h.summary.first_price * 100
+              var s = dSt
+              return (s && s.ok) ? (Number(s.change_pct) || 0) : 0
             }
-            readonly property real dToman: {
-              var s = parent.dSt
-              var useLive = (root.range === "1d") && s && s.ok
-              if (useLive) return Number(s.change_toman) || 0
-              if (root.detailHistory && root.detailHistory.summary && root.detailHistory.summary.points >= 2)
-                return root.detailHistory.summary.range_delta
-              return s && s.ok ? (Number(s.change_toman) || 0) : 0
+            // "The price range was this at first, now it's that."
+            readonly property string dRangeText: {
+              var h = root.detailHistory
+              if (h && h.summary && h.summary.points >= 2)
+                return Model.formatToman(h.summary.first_price) + " → " + Model.formatToman(h.summary.last_price) + " T"
+              var s = dSt
+              return (s && s.ok) ? Model.formatSignedToman(Number(s.change_toman) || 0) + " T" : ""
             }
             Row {
               spacing: Style.space(10)
               readonly property string dDir: Model.direction(parent.dPct)
+              readonly property string rangeText: parent.dRangeText
               Text {
-                text: Model.directionGlyph(parent.dDir) + " " + Model.formatPercent(parent.dPct) + "%"
+                text: Model.directionGlyph(parent.dDir) + " " + Model.formatPercent(parent.parent.dPct) + "%"
                 color: root.dirColor(parent.dDir)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.subtitle
                 font.bold: true
               }
               Text {
-                text: Model.formatSignedToman(parent.dToman) + " T"
+                text: parent.rangeText
                 color: root.dirColor(parent.dDir)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.subtitle
@@ -639,7 +681,6 @@ Panel {
                     onClicked: {
                       var map = { "1D": "1d", "1W": "1w", "1Y": "1y", "5Y": "5y", "All": "all" }
                       root.setRange(map[modelData])
-                      root.fetchDetail(root.selectedKey, root.range)
                     }
                   }
                 }
@@ -658,15 +699,14 @@ Panel {
 
               readonly property var hist: root.detailHistory
               readonly property var series: (hist && hist.series) ? hist.series : []
+              readonly property string rangeDir: (hist && hist.summary && hist.summary.points >= 2)
+                ? Model.direction(hist.summary.range_delta)
+                : ((root.detailState && root.detailState.ok) ? Model.direction(root.detailState.change_pct) : "flat")
               ChartCanvas {
                 anchors.fill: parent
                 anchors.margins: Style.space(4)
                 points: parent.series
-                color: {
-                  var s = root.detailState
-                  var d = (s && s.ok) ? Model.direction(s.change_pct) : "flat"
-                  return root.dirColor(d)
-                }
+                color: root.dirColor(parent.rangeDir)
                 fill: Util.alpha(parent.color, 0.18)
                 visible: parent.series.length >= 2
               }
@@ -698,7 +738,6 @@ Panel {
                 spacing: Style.space(14)
                 Text { text: parent.sum ? ("High " + Model.formatToman(parent.sum.high) + " T") : ""; color: Qt.darker(root.bar.barForeground, 1.3); font.family: root.bar.fontFamily; font.pixelSize: Style.font.bodySmall }
                 Text { text: parent.sum ? ("Low " + Model.formatToman(parent.sum.low) + " T") : ""; color: Qt.darker(root.bar.barForeground, 1.3); font.family: root.bar.fontFamily; font.pixelSize: Style.font.bodySmall }
-                Text { text: parent.sum ? ("Δ " + Model.formatToman(parent.sum.range_delta) + " T") : ""; color: Qt.darker(root.bar.barForeground, 1.3); font.family: root.bar.fontFamily; font.pixelSize: Style.font.bodySmall }
               }
             }
 

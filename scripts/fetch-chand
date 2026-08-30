@@ -2,20 +2,23 @@
 #
 # fetch-chand — Chand rate fetcher for the Omarchy Chand bar plugin.
 #
-# HYBRID SOURCES (mirrors how the Chand iOS app works):
-#   * Wallex  (api.wallex.ir) — REAL-TIME. USD (USDTTMN), crypto (BTCUSDT…),
-#                                gold tokens (XAUTUSDT/PAXGUSDT), and ALL chart
-#                                history via its klines endpoint. Fast, live,
-#                                with real 24h change + high/low.
-#   * TGJU    (call5.tgju.org/ajax.json) — BREADTH. Fiat currencies (EUR, GBP,
-#                                AED…) and physical coins (Azadi, Emami, geram18…)
-#                                that Wallex does not list. Daily snapshot, so
-#                                its change is often 0 — used for price only.
+# HYBRID SOURCES (mirrors the Chand iOS app):
+#   * Wallex (api.wallex.ir) — REAL-TIME, TMN-quoted markets (USDTTMN, BTCTMN,
+#     ETHTMN, XRPTMN, LTCTMN, BNBTMN, XAUTTMN) for live prices AND full chart
+#     history via its UDF klines endpoint (hourly for 1d/1w, daily beyond).
+#   * TGJU (call5.tgju.org/ajax.json) — live fiat + physical-coin prices.
+#     TGJU quotes RIAL (toman = rial / 10); crypto rows are USD.
+#   * api.tgju.org (TGJU first-party) — daily OHLC history back to 2012 for
+#     every TGJU asset, used for fiat/coin chart ranges.
 #
-#   fetch-chand current [key...]        -> { ok, items:[ ... ] }
-#   fetch-chand history [key] [1d|1w|1y|5y|all]
+# All chart ranges are cached in ~/.cache/omarchy-chand/charts and rebuilt in
+# the background by `warm` (the panel runs it every 5 minutes). `history`
+# serves the cached chart instantly when present and only hits the network on
+# a cold miss, so opening a detail chart never blocks on fetching.
 #
-# On failure prints {"ok":false,"error":"..."} and still emits last cache.
+#   fetch-chand current [key...]          -> { ok, items:[ ... ] }
+#   fetch-chand history [key] [range]     -> { ok, key, range, series, summary }
+#   fetch-chand warm [key...]             -> rebuild current + every range
 #
 # Dependencies: curl, jq. No pip / npm / sudo / hooks.
 
@@ -23,29 +26,33 @@ set -o pipefail
 
 UA="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"
 WALLEX_URL="https://api.wallex.ir/v1/markets"
+WALLEX_KLINE_URL="https://api.wallex.ir/v1/udf/history"
 TGJU_URL="https://call5.tgju.org/ajax.json"
+TGJU_HIST_URL="https://api.tgju.org/v1/market/indicator/summary-table-data"
 CACHE_DIR="${CHAND_CACHE_DIR:-$HOME/.cache/omarchy-chand}"
 HISTORY_DIR="$CACHE_DIR/history"
+CHARTS_DIR="$CACHE_DIR/charts"
 MAX_POINTS=8000
+RANGES=(1d 1w 1y 5y all)
+EPOCH_FLOOR=946684800   # 2000-01-01: bounds "all" and avoids negative epochs
 
-mkdir -p "$HISTORY_DIR" 2>/dev/null || true
+mkdir -p "$HISTORY_DIR" "$CHARTS_DIR" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Asset table: key -> source + remote symbol/key.
-#   src "wallex" : wallex symbol (USDTTMN, BTCUSDT, XAUTUSDT, ...)
+#   src "wallex" : wallex symbol, TMN-quoted (BTCTMN, XAUTTMN, ...)
 #   src "tgju"   : tgju current key (price_eur, sekee, ...)
 # ---------------------------------------------------------------------------
 wallex_sym() { # key -> wallex symbol (empty if not wallex)
   case "$1" in
     price_dollar_rl) echo "USDTTMN" ;;       # live USD in Toman
-    crypto-bitcoin)  echo "BTCUSDT" ;;
-    crypto-ethereum) echo "ETHUSDT" ;;
     crypto-tether)   echo "USDTTMN" ;;       # Tether ~ USD in Toman
-    crypto-ripple)   echo "XRPUSDT" ;;
-    crypto-litecoin) echo "LTCUSDT" ;;
-    crypto-eos)      echo "" ;;              # not listed on Wallex; falls to tgju
-    crypto-binance-coin) echo "BNBUSDT" ;;
-    gerami)          echo "XAUTUSDT" ;;      # gold token proxy for "1g gold coin"
+    crypto-bitcoin)  echo "BTCTMN" ;;
+    crypto-ethereum) echo "ETHTMN" ;;
+    crypto-ripple)   echo "XRPTMN" ;;
+    crypto-litecoin) echo "LTCTMN" ;;
+    crypto-binance-coin) echo "BNBTMN" ;;
+    gerami)          echo "XAUTTMN" ;;       # gold token ~ 1g gold
     *) echo "" ;;
   esac
 }
@@ -55,7 +62,6 @@ tgju_key() { # key -> tgju key (empty if not tgju)
   case "$1" in
     price_dollar_rl|price_eur|price_gbp|price_aed|price_try|price_chf|price_sek|price_nok|price_dkk|price_sgd|price_cad|price_aud|price_cny|price_jpy|price_hkd|price_inr|price_myr|price_thb|price_rub|price_qar|price_omr|price_kwd|price_sar|price_iqd|price_bhd|price_azn|price_amd|price_afn|geram18|geram24|mesghal|sekee|sekeb|nim|rob) echo "$1" ;;
     crypto-eos) echo "crypto-eos" ;;
-    crypto-binance-coin) echo "crypto-binance-coin" ;;
     *) echo "" ;;
   esac
 }
@@ -83,6 +89,15 @@ tehran_epoch() { TZ=Asia/Tehran date +%s; }
 tehran_date()  { TZ=Asia/Tehran date +%Y-%m-%d; }
 
 cache_file() { printf '%s/%s.jsonl' "$HISTORY_DIR" "$1"; }
+chart_file() { printf '%s/%s_%s.json' "$CHARTS_DIR" "$1" "$2"; }
+
+# Normalize all numbers in a JSON payload: drop float noise
+# (204999.0000000000000000 -> 204999), cap precision at 2 decimals.
+# Note: the match arm MUST return (.|floor); returning "." preserves the
+# long float representation.
+normalize_numbers() {
+  jq -c '(.. | numbers) |= (if . == floor then (.|floor) else ((. * 100 | round) / 100) end)'
+}
 
 # ---------------------------------------------------------------------------
 # raw fetches (memoized within one invocation)
@@ -91,7 +106,10 @@ cache_file() { printf '%s/%s.jsonl' "$HISTORY_DIR" "$1"; }
 WALLEX_RAW=""
 fetch_wallex() {
   [ -n "$WALLEX_RAW" ] && return 0
-  WALLEX_RAW="$(curl -fsS --max-time 12 -A "$UA" "$WALLEX_URL" 2>/dev/null)" || return 1
+  # Wallex sometimes prepends a stray NUL byte; command substitution strips
+  # NULs, which corrupts the JSON and breaks every path that funnels the
+  # payload through the shell. Strip it up front.
+  WALLEX_RAW="$(curl -fsS --max-time 12 -A "$UA" "$WALLEX_URL" 2>/dev/null | tr -d '\000')" || return 1
   printf '%s' "$WALLEX_RAW" | jq -e '.result.symbols' >/dev/null 2>&1 || return 1
   return 0
 }
@@ -153,45 +171,64 @@ resolve_tgju() {
   dp="$(printf '%s' "$entry" | jq -r '.dp // 0')"
   h="$(printf '%s' "$entry" | jq -r '.h // "0"')"; h="$(num "$h")"
   l="$(printf '%s' "$entry" | jq -r '.l // "0"')"; l="$(num "$l")"
-  # crypto on TGJU is USD -> convert via live USDTTMN rate.
+  # TGJU quotes RIAL for fiat/coins (toman = rial/10); crypto rows are USD
+  # -> convert via the live USDTTMN rate.
   case "$key" in crypto-*)
     fetch_wallex || { printf 'ERR:nowallex'; return 1; }
-    local usd rate toman2
-    usd="$(printf '%s' "$entry" | jq -r '.p // "0"')"; usd="$(num "$usd")"
+    local rate toman2
     rate="$(printf '%s' "$WALLEX_RAW" | jq -r '.result.symbols.USDTTMN.stats.lastPrice // "0"')"
     rate="$(num "$rate")"
-    toman2="$(awk -v u="$usd" -v r="$rate" 'BEGIN{printf "%.2f", u*r}')"
-    p="$toman2"; h="$toman2"; l="$toman2"
+    toman2="$(awk -v u="$p" -v r="$rate" 'BEGIN{printf "%.2f", u*r}')"
+    p="$toman2"
+    d="$(awk -v u="$d" -v r="$rate" 'BEGIN{printf "%.2f", u*r}')"
+    h="$(awk -v u="$h" -v r="$rate" 'BEGIN{printf "%.2f", u*r}')"
+    l="$(awk -v u="$l" -v r="$rate" 'BEGIN{printf "%.2f", u*r}')"
+    ;;
+  *)
+    # rial -> toman (fiat + coins). Crypto already handled above.
+    p="$(awk -v r="$p" 'BEGIN{printf "%.2f", r/10}')"
+    d="$(awk -v r="$d" 'BEGIN{printf "%.2f", r/10}')"
+    h="$(awk -v r="$h" 'BEGIN{printf "%.2f", r/10}')"
+    l="$(awk -v r="$l" 'BEGIN{printf "%.2f", r/10}')"
+    ;;
   esac
   local toman rial high_toman low_toman change_toman
-  toman="$p"; rial="$(awk -v r="$p" 'BEGIN{printf "%.0f", r}')"
+  toman="$p"; rial="$(awk -v r="$toman" 'BEGIN{printf "%.0f", r*10}')"
   high_toman="$h"; low_toman="$l"
-  change_toman="$(awk -v r="$d" 'BEGIN{printf "%.2f", r/10}')"
+  change_toman="$d"
   printf '%s %s %s %s %s %s %s %s %s' \
     "$toman" "$rial" "$dp" "$change_toman" "$high_toman" "$low_toman" "null" "null" "tgju"
   return 0
 }
 
-resolve() {
-  local key="$1" src; src="$(src_of "$key")"
+# resolve_to_file: same as resolve() but writes the space-separated result
+# line (or an ERR: line) into $2. Every fetch path must go through command
+# substitution only where unavoidable — resolve itself must NOT run in a
+# subshell or the memoized WALLEX_RAW/TGJU_RAW die with each call.
+resolve_to_file() {
+  local key="$1" out="$2" src
+  src="$(src_of "$key")"
   case "$src" in
-    wallex) fetch_wallex || return 1; resolve_wallex "$(wallex_sym "$key")" ;;
-    tgju)   fetch_tgju   || return 1; resolve_tgju   "$(tgju_key "$key")" ;;
-    *) { printf 'ERR:unknown:%s' "$key"; return 1; } ;;
+    wallex) fetch_wallex  && resolve_wallex "$(wallex_sym "$key")" >"$out" || printf 'ERR:%s' "$src" >"$out" ;;
+    tgju)   fetch_tgju    && resolve_tgju   "$(tgju_key "$key")"   >"$out" || printf 'ERR:%s' "$src" >"$out" ;;
+    *) printf 'ERR:unknown' >"$out" ;;
   esac
+  # resolve_* return 1 with ERR: printed on failure; the file starts with
+  # ERR: in that case.
 }
-
-# ---------------------------------------------------------------------------
-# current
-# ---------------------------------------------------------------------------
 
 emit_item() {
   local key="$1"
-  local res; res="$(resolve "$key")"
-  if [ $? -ne 0 ] || [ -z "$res" ]; then
-    printf '%s' "$(jq -nc --arg key "$key" '{ok:false, key:$key, error:"unresolved"}')"
-    return
-  fi
+  local resf; resf="$(mktemp)"
+  resolve_to_file "$key" "$resf"
+  local res; res="$(cat "$resf")"
+  rm -f "$resf"
+  case "$res" in
+    ERR:*|"")
+      jq -nc --arg key "$key" '{ok:false, key:$key, error:"unresolved"}'
+      return
+      ;;
+  esac
   local toman rial dp change_toman high low buy sell src
   read -r toman rial dp change_toman high low buy sell src <<<"$res"
 
@@ -214,17 +251,22 @@ emit_item() {
       sell_toman:(if $sell=="null" then null else ($sell|tonumber) end),
       tehran_date:$fa, fetched_at:(now|todate)
     }' \
-    | jq -c '(.. | numbers) |= (if . == floor then (.|floor) else ((. * 100 | round) / 100) end)'
+    | normalize_numbers
 }
 
 cmd_current() {
   local keys=("$@")
   [ "${#keys[@]}" -eq 0 ] && die "current requires at least one key"
-  local items="" sep=""
+  # Emit into a temp file rather than via $(emit_item): command substitution
+  # runs each call in a subshell, which defeats the memoized TGJU/Wallex
+  # fetches (one network hit per key instead of one total).
+  local tmp; tmp="$(mktemp)"
+  local k
   for k in "${keys[@]}"; do
-    items="${items}${sep}$(emit_item "$k")"; sep=","
+    emit_item "$k" >>"$tmp"
   done
-  printf '{"ok":true,"items":[%s]}\n' "$items"
+  printf '{"ok":true,"items":[%s]}\n' "$(paste -sd, "$tmp")"
+  rm -f "$tmp"
 }
 
 # ---------------------------------------------------------------------------
@@ -238,8 +280,8 @@ range_days() {
   esac
 }
 
-# Wallex kline resolution per range: intraday for short ranges so the history
-# summary reflects real hour-to-hour and day-to-day movement.
+# Wallex kline resolution per range: hourly for short ranges (real intraday
+# movement), daily beyond.
 range_res() {
   case "$1" in
     1d) echo 60;;   # hourly -> ~24 pts/day
@@ -251,28 +293,69 @@ range_res() {
   esac
 }
 
-# Wallex klines: real daily closes -> proper ups/downs.
 fetch_wallex_klines() {
   local sym="$1" from="$2" to="$3" res="${4:-D}"
-  curl -fsS --max-time 15 -A "$UA" \
-    "https://api.wallex.ir/v1/udf/history?symbol=$sym&resolution=$res&from=$from&to=$to" 2>/dev/null
+  curl -fsS --max-time 20 -A "$UA" \
+    "$WALLEX_KLINE_URL?symbol=$sym&resolution=$res&from=$from&to=$to" 2>/dev/null
 }
 
-cmd_history() {
-  local key="$1" range="${2:-1y}"
-  [ -z "$key" ] && die "history requires a key"
+# TGJU daily OHLC raw payload, memoized per key within one invocation: warm
+# builds 5 ranges per key and the full-history payload is ~600KB per asset.
+declare -A TGHIST_MEMO
+tgju_hist_raw() {
+  local k="$1"
+  if [[ -v TGHIST_MEMO[$k] ]]; then
+    printf '%s' "${TGHIST_MEMO[$k]}"
+    return 0
+  fi
+  local v
+  v="$(curl -fsS --max-time 30 -A "$UA" \
+    "$TGJU_HIST_URL/$k?lang=en&order_dir=desc&draw=1&start=0&length=10000" 2>/dev/null)" || { echo ""; return 1; }
+  TGHIST_MEMO[$k]="$v"
+  printf '%s' "$v"
+}
+
+# TGJU daily OHLC: rows are [open,low,high,close,change,change%,gregorian,jalali]
+# in RIAL (crypto rows in USD). order_dir=desc -> newest first. Prices are
+# comma-formatted strings. Returns JSON array of {ts,toman}, ascending.
+# unit: "rial" (divide by 10) or "usd" (multiply by live USDTTMN rate).
+fetch_tgju_daily() {
+  local tgjukey="$1" cutoff="$2" unit="$3"
+  local raw; raw="$(tgju_hist_raw "$tgjukey")" || { echo "[]"; return; }
+  [ -z "$raw" ] && { echo "[]"; return; }
+  local conv
+  if [ "$unit" = "usd" ]; then
+    fetch_wallex || { echo "[]"; return; }
+    conv="$(num "$(printf '%s' "$WALLEX_RAW" | jq -r '.result.symbols.USDTTMN.stats.lastPrice // "0"')")"
+    [ "$conv" = "0" ] || [ -z "$conv" ] && { echo "[]"; return; }
+    printf '%s' "$raw" | jq -c --argjson cutoff "$cutoff" --argjson rate "$conv" '
+      [ .data[]
+        | (.[6] as $ds | .[3] as $c
+          | ($ds | strptime("%Y/%m/%d") | mktime) as $ts
+          | select($ts >= $cutoff)
+          | {ts:$ts, toman:($c | gsub(","; "") | tonumber * $rate)})
+      ] | sort_by(.ts)'
+  else
+    printf '%s' "$raw" | jq -c --argjson cutoff "$cutoff" '
+      [ .data[]
+        | (.[6] as $ds | .[3] as $c
+          | ($ds | strptime("%Y/%m/%d") | mktime) as $ts
+          | select($ts >= $cutoff)
+          | {ts:$ts, toman:($c | gsub(","; "") | tonumber / 10)})
+      ] | sort_by(.ts)'
+  fi
+}
+
+# Build a full chart for key+range (network) -> prints compact {ts,toman} JSON
+# array. Tries Wallex klines first; TGJU daily rows otherwise; the local
+# 5-minute append cache last (gives TGJU assets intraday points for 1d/1w).
+build_series() {
+  local key="$1" range="$2" cutoff="$3" now="$4"
   local src; src="$(src_of "$key")"
-  local now; now="$(date +%s)"
-  local days; days="$(range_days "$range")"
-  local cutoff=$(( now - days * 86400 ))
-  # Lower bound: year 2000. Avoids a negative epoch (which overflows the
-  # curl/jq call) and Wallex has no data before 2018 anyway.
-  [ "$cutoff" -lt 946684800 ] && cutoff=946684800
-  local series="[]" meta="null"
+  local series="[]"
 
   if [ "$src" = "wallex" ]; then
     local sym; sym="$(wallex_sym "$key")"
-    [ -z "$sym" ] && sym="$(printf '%s' "$key" | sed 's/^price_dollar_rl$/USDTTMN/')"
     local kl; kl="$(fetch_wallex_klines "$sym" "$cutoff" "$now" "$(range_res "$range")")"
     if [ -n "$kl" ]; then
       series="$(printf '%s' "$kl" | jq -c '
@@ -280,12 +363,81 @@ cmd_history() {
           [ range(0; .t | length) as $i | {ts:(.t[$i] | floor), toman:(.c[$i] | tonumber)} ]
         else [] end')"
     fi
+  elif [ "$src" = "tgju" ]; then
+    local tkey; tkey="$(tgju_key "$key")"
+    local unit="rial"
+    case "$tkey" in crypto-*) unit="usd" ;; esac
+    series="$(fetch_tgju_daily "$tkey" "$cutoff" "$unit")"
   fi
 
-  # If Wallex gave nothing (or non-wallex asset), fall back to the append-only
-  # local cache (no real history API for TGJU assets).
-  if [ "$(printf '%s' "$series" | jq -r 'length')" -eq 0 ]; then
-    cmd_current "$key" >/dev/null 2>&1 || true
+  # Intraday supplement for TGJU assets on short ranges: daily rows only give
+  # one point per day, so splice in the 5-minute local cache points.
+  if [ "$src" = "tgju" ] && { [ "$range" = "1d" ] || [ "$range" = "1w" ]; }; then
+    local f; f="$(cache_file "$key")"
+    if [ -f "$f" ]; then
+      local localpts
+      localpts="$(awk -v c="$cutoff" '
+        match($0,/"ts":([0-9]+)/,m) && match($0,/"toman":([0-9.]+)/,n) && (m[1]+0) >= c {
+          printf "{\"ts\":%s,\"toman\":%s}\n", m[1], n[1]
+        }' "$f" | jq -s 'sort_by(.ts)')"
+      series="$(printf '%s' "$series" | jq -c --argjson lp "$localpts" '$lp + . | unique_by(.ts) | sort_by(.ts)')"
+    fi
+  fi
+
+  printf '%s' "$series"
+}
+
+# Summary meta from a series: points, high/low, first/last, range delta,
+# first->last prices (the "was this, now that" pair shown in the header).
+series_meta() {
+  printf '%s' "$1" | jq -c '
+    if length == 0 then
+      {points:0, high:null, low:null, from:null, to:null,
+       first_price:null, last_price:null, range_delta:null,
+       jalali_from:"", jalali_to:""}
+    else
+      (map(.toman) | {high:max, low:min}) as $hl
+      | (.[0].ts) as $from | (.[-1].ts) as $to
+      | (.[0].toman) as $fp | (.[-1].toman) as $lp
+      | {points:length, high:$hl.high, low:$hl.low, from:$from, to:$to,
+         first_price:$fp, last_price:$lp, range_delta:($lp - $fp),
+         jalali_from:($from|strftime("%Y-%m-%d")),
+         jalali_to:($to|strftime("%Y-%m-%d"))}
+    end'
+}
+
+cmd_history() {
+  local key="$1" range="${2:-1y}"
+  [ -z "$key" ] && die "history requires a key"
+  local cf; cf="$(chart_file "$key" "$range")"
+
+  # Serve the cached chart instantly when it exists. The background `warm`
+  # (run by the panel every 5 min) keeps these fresh; opening a chart must
+  # never block on the network when a cached copy is available.
+  if [ -s "$cf" ]; then
+    cat "$cf"
+    return
+  fi
+
+  # Cold miss: build synchronously and cache.
+  build_and_cache "$key" "$range"
+}
+
+build_and_cache() {
+  local key="$1" range="${2:-1y}"
+  local now; now="$(date +%s)"
+  local days; days="$(range_days "$range")"
+  local cutoff=$(( now - days * 86400 ))
+  [ "$cutoff" -lt "$EPOCH_FLOOR" ] && cutoff="$EPOCH_FLOOR"
+
+  local series; series="$(build_series "$key" "$range" "$cutoff" "$now")"
+
+  # Never return an empty chart if the local cache has anything.
+  local npts=0
+  if [ -n "$series" ]; then
+    npts="$(printf '%s' "$series" | jq -r 'if type=="array" then length else 0 end' 2>/dev/null || echo 0)"
+  fi
+  if [ "$npts" = "0" ]; then
     local f; f="$(cache_file "$key")"
     [ -f "$f" ] && series="$(awk -v c="$cutoff" '
       match($0,/"ts":([0-9]+)/,m) && match($0,/"toman":([0-9.]+)/,n) && (m[1]+0) >= c {
@@ -293,19 +445,7 @@ cmd_history() {
       }' "$f" | jq -s 'sort_by(.ts)')"
   fi
 
-  # Honest summary from the series (first/last, min/max, range delta).
-  meta="$(printf '%s' "$series" | jq -c '
-    if length == 0 then
-      {points:0, high:null, low:null, from:null, to:null, jalali_from:"", jalali_to:"", range_delta:null}
-    else
-      (map(.toman) | {high:(max), low:(min)}) as $hl
-      | (.[0].ts) as $from | (.[-1].ts) as $to
-      | (.[-1].toman - .[0].toman) as $rd
-      | {points:length, high:$hl.high, low:$hl.low, from:$from, to:$to,
-         range_delta:$rd,
-         jalali_from:($from|strftime("%Y-%m-%d")),
-         jalali_to:($to|strftime("%Y-%m-%d"))}
-    end')"
+  local meta; meta="$(series_meta "$series")"
 
   local eff_range="$range"
   if [ "$range" = "all" ]; then
@@ -316,15 +456,55 @@ cmd_history() {
   # Write the (potentially large) series to a temp file and read it back via
   # --slurpfile instead of --argjson, which fails with "Argument list too long"
   # for multi-year ranges (~150KB of kline points).
-  local serfile; serfile="$(mktemp)"
+  local serfile outfile
+  serfile="$(mktemp)"
+  outfile="$(mktemp)"
   printf '%s' "$series" >"$serfile"
 
   jq -nc --arg key "$key" --arg range "$eff_range" \
     --slurpfile series "$serfile" --argjson meta "$meta" \
     '{ok:true, key:$key, range:$range, series:$series[0], summary:$meta}' \
-    | jq -c '(.. | numbers) |= (if . == floor then (.|floor) else ((. * 100 | round) / 100) end)'
+    | normalize_numbers >"$outfile"
 
-  rm -f "$serfile"
+  cp "$outfile" "$(chart_file "$key" "$range")" 2>/dev/null || true
+  cat "$outfile"
+  rm -f "$serfile" "$outfile"
+}
+
+# ---------------------------------------------------------------------------
+# warm: rebuild current + every cached chart range in the background.
+# The panel runs this on a 5-minute timer so `history` always serves a fresh
+# cached chart instantly and opening a chart never waits on the network.
+# ---------------------------------------------------------------------------
+
+chart_age_min() { # file -> age in minutes, -1 if missing
+  local f="$1"
+  [ -f "$f" ] || { echo -1; return; }
+  echo $(( ( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) ) / 60 ))
+}
+
+cmd_warm() {
+  local keys=("$@")
+  [ "${#keys[@]}" -eq 0 ] && die "warm requires at least one key"
+
+  # Every chart range for every key. Current prices are the panel poller's job
+  # (it appends the intraday points these charts splice in); warm is charts.
+  # TGJU long ranges are daily rows -> skip a rebuild while the cached chart
+  # is under 12h old (their 1d/1w still splice fresh intraday cache points).
+  local k r age
+  for k in "${keys[@]}"; do
+    for r in "${RANGES[@]}"; do
+      case "$r" in 1y|5y|all)
+        if [ "$(src_of "$k")" = "tgju" ]; then
+          age="$(chart_age_min "$(chart_file "$k" "$r")")"
+          [ "$age" -ge 0 ] && [ "$age" -lt 720 ] && continue
+        fi
+        ;;
+      esac
+      build_and_cache "$k" "$r" >/dev/null 2>&1 || true
+    done
+  done
+  printf '{"ok":true,"warmed":%s}\n' "${#keys[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -334,5 +514,6 @@ cmd_history() {
 case "${1:-}" in
   current) shift; cmd_current "$@";;
   history) cmd_history "${2:-}" "${3:-1y}";;
-  *) die "usage: fetch-chand current <key> [<key>...] | fetch-chand history <key> [1d|1w|1y|5y|all]";;
+  warm)    shift; cmd_warm "$@";;
+  *) die "usage: fetch-chand current <key>... | history <key> [1d|1w|1y|5y|all] | warm <key>...";;
 esac

@@ -13,11 +13,13 @@ rates in **Toman**, like the iOS app [Chand](https://apps.apple.com/us/app/chand
 - **Watchlist** — scrollable list of assets you added; tap a row for Detail,
   `✕` removes just that row. (USD stays on the bar regardless — it is the locked
   primary.)
-- **Detail** — big Toman price, colored Δ% + Δ T, buy/sell (only when both
-  exist and differ), range chips (`1D 1W 1Y 5Y All`), an area chart (real
-  intraday/weekly movement from Wallex klines), a Jalali from→to summary (high /
-  low / range Δ), and a converter on this screen only. Switching range only
-  refetches the chart — it does not reload the plugin.
+- **Detail** — big Toman price, colored Δ% for the selected range (computed as
+  first-price → current-price from the chart, so it is never 0), the
+  "first → current" price pair in Toman, buy/sell (only when both exist and
+  differ), range chips (`1D 1W 1Y 5Y All`), an area chart (real movement from
+  cached history), a Jalali from→to summary (high / low), and a converter on
+  this screen only. Switching range only refetches the chart — it does not
+  reload the plugin.
 - **Catalog** — searchable, grouped add screen (Currencies / Gold & coins /
   Crypto). Already-added rows show a checkmark; tap adds and stays open for
   multi-add.
@@ -25,24 +27,32 @@ rates in **Toman**, like the iOS app [Chand](https://apps.apple.com/us/app/chand
 ## Data
 
 - **Hybrid, real-time sources** (mirrors the Chand iOS app):
-  - **Wallex** `https://api.wallex.ir/v1/markets` — real-time USD (`USDTTMN`),
-    crypto (`BTCUSDT`…), gold tokens (`XAUTUSDT`/`PAXGUSDT`), and **all chart
-    history** via its klines endpoint (`/v1/udf/history`, 1D–5Y+ daily closes).
-    This is the fast, live, accurate path the iPhone Chand app uses.
-  - **TGJU** `https://call5.tgju.org/ajax.json` — breadth only: fiat currencies
+  - **Wallex** `https://api.wallex.ir/v1/markets` — real-time prices for USD and
+    crypto in **Toman**, via Wallex's TMN-quoted markets (`USDTTMN`, `BTCTMN`,
+    `ETHTMN`, `XRPTMN`, `LTCTMN`, `BNBTMN`, `XAUTTMN`). These are the fast,
+    live, accurate Toman prices. Chart history comes from Wallex's UDF klines
+    (`/v1/udf/history`): hourly for 1D/1W, daily for 1Y/5Y/All.
+  - **TGJU** `https://call5.tgju.org/ajax.json` — breadth for fiat currencies
     (EUR, GBP, AED…) and physical coins (Azadi, Emami, geram18…) that Wallex
-    does not list. Daily snapshot, so its change is often 0.
+    does not list. TGJU quotes **rial** (`toman = rial ÷ 10`); crypto rows are
+    USD (`toman = usd × USDTTMN`). Daily snapshot, so its live change is often 0.
+  - **api.tgju.org** (TGJU first-party) — daily OHLC history back to 2012 for
+    every TGJU asset, used for fiat/coin chart ranges.
 - No ECB / Yahoo / NIMA / SANA. No third-party TGJU proxy.
-- USD / crypto / gold tokens: Toman straight from Wallex. TGJU fiat & coins:
-  Toman = rial ÷ 10; TGJU crypto (not on Wallex): Toman = `usd × USDTTMN ÷ 1`.
+- **Background caching (no on-demand chart fetching).** Every 5 minutes the
+  panel runs `fetch-chand warm` in the background, rebuilding every chart range
+  for every watchlist key into `~/.cache/omarchy-chand/charts/<key>_<range>.json`.
+  Opening a chart is an **instant cache read** (`history` serves the file
+  directly, 3 ms) — it never blocks on the network. The first open of a brand-new
+  key triggers one background warm and re-reads when it lands.
+- The 5-minute poller fetches live current prices via `fetch-chand current`,
+  appending the 5-minute points to `~/.cache/omarchy-chand/history/<key>.jsonl`
+  (capped at 8000 points). Short TGJU ranges (1D/1W) splice these intraday
+  points in for real hour-to-hour movement. Offline uses the last snapshot.
 - Auto-refreshes every **5 minutes**; tap the panel's **↻** button (or
   middle-click the pill) for an on-demand update. The full watchlist + open
   detail are fetched each tick and merged into the snapshot so rows never blink
   or reset.
-- History cache at `~/.cache/omarchy-chand/history/<key>.jsonl` (append-only,
-  capped at 8000 points, Tehran day boundary). Wallex klines backfill real
-  ups/downs; TGJU-only assets fall back to the local cache. Offline uses the
-  last cached snapshot.
 - All fetching runs off the UI thread via `Process` + `StdioCollector` (one
   `curl` + `jq` call per refresh), exactly like the first-party weather widget.
 
