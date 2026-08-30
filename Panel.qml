@@ -71,9 +71,14 @@ Panel {
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
       root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
+  // Range is in-memory only. Previously this called persist()/updateEntryInline
+  // on every chip tap, which reloaded the whole plugin (the panel shook and the
+  // pill flickered to "Chand" while settings reinitialized). Range does NOT need
+  // to be persisted, so we just switch it and refetch the chart for this key.
   function setRange(r) {
+    if (root.range === r) return
     root.range = r
-    persist(buildEntry({}))
+    if (root.selectedKey) root.fetchDetail(root.selectedKey, r)
   }
   function setPrimary(key) {
     // Bar primary is locked to USD (product spec: only USD on the bar, nothing
@@ -160,9 +165,7 @@ Panel {
     if (root.surface === "watchlist") {
       var syms = Array.isArray(cfg.symbols) ? cfg.symbols : []
       if (root.cursor >= 0 && root.cursor < syms.length) {
-        var key = syms[root.cursor]
-        root.setPrimary(key)
-        root.goDetail(key)
+        root.goDetail(syms[root.cursor])
       }
     } else if (root.surface === "catalog") {
       var item = root.catalogItems[root.cursor]
@@ -469,7 +472,7 @@ Panel {
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onEntered: root.cursor = index
-                  onClicked: { root.setPrimary(modelData); root.goDetail(modelData) }
+                  onClicked: { root.goDetail(modelData) }
                 }
               }
             }
@@ -640,6 +643,41 @@ Panel {
                     }
                   }
                 }
+              }
+            }
+
+            // Chart (or collecting-history placeholder).
+            Rectangle {
+              width: parent.width
+              height: Style.space(120)
+              radius: Style.cornerRadius
+              color: Qt.darker(root.bar.background, 1.0)
+              border.width: 1
+              border.color: Util.alpha(root.bar.barForeground, 0.08)
+              clip: true
+
+              readonly property var hist: root.detailHistory
+              readonly property var series: (hist && hist.series) ? hist.series : []
+              ChartCanvas {
+                anchors.fill: parent
+                anchors.margins: Style.space(4)
+                points: parent.series
+                color: {
+                  var s = root.detailState
+                  var d = (s && s.ok) ? Model.direction(s.change_pct) : "flat"
+                  return root.dirColor(d)
+                }
+                fill: Util.alpha(parent.color, 0.18)
+                visible: parent.series.length >= 2
+              }
+              Text {
+                visible: parent.series.length < 2
+                anchors.centerIn: parent
+                text: "Collecting history…"
+                color: Qt.darker(root.bar.barForeground, 1.5)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
               }
             }
 

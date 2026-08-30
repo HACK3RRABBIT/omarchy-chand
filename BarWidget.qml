@@ -66,16 +66,12 @@ BarWidget {
 
   readonly property string codeText: root.primaryEntry ? root.primaryEntry.code : "USD"
 
-  // Short pill: "USD 206,010 ▲2.33%" (Toman implied by the app; no "T",
-  // no space padding). Compact mode: "USD 206.2k ▲2.33%".
+  // Pill shows ONLY the price, colored green (up) / red (down) by pillColor.
+  // No currency code, no change %. Stale -> prefix a ↺; error -> "✕".
   readonly property string label: {
-    if (root.isError) return "Chand ✕"
-    if (!root.hasData) return "Chand …"
-    // Glyph (▲/▼/▬) already encodes direction, so drop the redundant "+".
-    var pct = Model.formatPercent(primaryState.change_pct).replace(/^\+/, "")
-    var tail = Model.directionGlyph(Model.direction(primaryState.change_pct)) + pct + "%"
-    var stale = root.isStale ? "↺ " : ""
-    return stale + root.codeText + " " + root.priceText + " " + tail
+    if (root.isError) return "✕"
+    if (!root.hasData) return "…"
+    return (root.isStale ? "↺ " : "") + root.priceText
   }
 
   // Price-only text for click-to-copy (the part the user wants).

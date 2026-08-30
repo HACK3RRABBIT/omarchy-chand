@@ -3,20 +3,21 @@
 A first-party-quality Omarchy Quattro bar widget that shows Iran's free-market
 rates in **Toman**, like the iOS app [Chand](https://apps.apple.com/us/app/chand/id1524200188).
 
-- **Bar pill** (compact by default) — `USD 205.1k ▲1.48%`. Short on the
-  bar; right-click toggles the full `USD 205,079 ▲1.48%` form. Colors follow the
-  spec exactly: up `#22c55e`, down `#ef4444`, flat = bar foreground. Fetch
-  errors use `Color.urgent`; stale/offline dims to 0.5 with a `↺`. Left-click
-  toggles the panel, middle (or the panel's ↻ button) refreshes, right-click
-  toggles compact. The bar pill always shows **USD only** (the default currency;
-  nothing else can be set on the bar). Add gold/crypto/currencies to the panel
-  watchlist.
+- **Bar pill** — just the **live USD price in Toman**, colored **green when
+  up / red when down** (up `#22c55e`, down `#ef4444`). No currency code, no
+  change %. Stale/offline dims to 0.5 with a `↺`; fetch error shows `✕`.
+  Left-click toggles the panel, middle (or the panel's ↻ button) refreshes,
+  right-click toggles compact (full vs. `205.1k` style). The bar always shows
+  **USD only** (the default currency; nothing else can be set). Add
+  gold/crypto/currencies to the panel watchlist.
 - **Watchlist** — scrollable list of assets you added; tap a row for Detail,
   `✕` removes just that row. (USD stays on the bar regardless — it is the locked
   primary.)
 - **Detail** — big Toman price, colored Δ% + Δ T, buy/sell (only when both
-  exist and differ), range chips (`1D 1W 1Y 5Y All`), a Jalali from→to summary
-  (high / low / range Δ), and a converter on this screen only.
+  exist and differ), range chips (`1D 1W 1Y 5Y All`), an area chart (real
+  intraday/weekly movement from Wallex klines), a Jalali from→to summary (high /
+  low / range Δ), and a converter on this screen only. Switching range only
+  refetches the chart — it does not reload the plugin.
 - **Catalog** — searchable, grouped add screen (Currencies / Gold & coins /
   Crypto). Already-added rows show a checkmark; tap adds and stays open for
   multi-add.
@@ -100,6 +101,7 @@ which also mirrors `~/.config/omarchy/chand.json`-style fields:
 manifest.json        plugin contract (id io.github.HACK3RRABBIT.chand)
 BarWidget.qml        bar pill + IPC entry point (loads Panel.qml)
 Panel.qml            watchlist / detail / catalog surfaces
+ChartCanvas.qml      Canvas area chart (paints inside its bounds)
 Model.js             catalog, settings, formatting, Jalali dates
 scripts/fetch-chand  curl + jq fetcher (current / history)
 LICENSE              MIT
