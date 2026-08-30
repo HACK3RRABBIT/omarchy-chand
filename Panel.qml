@@ -222,7 +222,6 @@ Panel {
               root.detailState = snap[root.selectedKey]
           }
         } catch (e) {}
-        root.pollerRunning = false
       }
     }
   }
