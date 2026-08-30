@@ -2,88 +2,110 @@
 #
 # fetch-chand — Chand rate fetcher for the Omarchy Chand bar plugin.
 #
-# Talks ONLY to https://call5.tgju.org/ajax.json (TGJU free-market rates).
-# No ECB/Yahoo/NIMA/SANA. No third-party TGJU proxy.
+# HYBRID SOURCES (mirrors how the Chand iOS app works):
+#   * Wallex  (api.wallex.ir) — REAL-TIME. USD (USDTTMN), crypto (BTCUSDT…),
+#                                gold tokens (XAUTUSDT/PAXGUSDT), and ALL chart
+#                                history via its klines endpoint. Fast, live,
+#                                with real 24h change + high/low.
+#   * TGJU    (call5.tgju.org/ajax.json) — BREADTH. Fiat currencies (EUR, GBP,
+#                                AED…) and physical coins (Azadi, Emami, geram18…)
+#                                that Wallex does not list. Daily snapshot, so
+#                                its change is often 0 — used for price only.
 #
-#   fetch-chand current [key]            -> one JSON object for that key
-#   fetch-chand history [key] [range]    -> { series: [ {ts, toman, ...}, ... ] }
+#   fetch-chand current [key...]        -> { ok, items:[ ... ] }
+#   fetch-chand history [key] [1d|1w|1y|5y|all]
 #
-# On success prints JSON including toman, rial, change_pct, change_toman,
-# high_toman, low_toman, buy_toman?, sell_toman?, source, fetched_at.
-# On failure prints {"ok":false,"error":"..."} and still emits last cache
-# when possible (so the bar/panel stay honest while offline).
-#
-# Units: TGJU reports everything in RIAL. Display Toman = rial / 10.
-# Crypto keys are quoted in USD on TGJU, so their Toman price is
-#   usd * price_dollar_rl / 10.
+# On failure prints {"ok":false,"error":"..."} and still emits last cache.
 #
 # Dependencies: curl, jq. No pip / npm / sudo / hooks.
 
 set -o pipefail
 
-UA="omarchy-chand/1.0"
+UA="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"
+WALLEX_URL="https://api.wallex.ir/v1/markets"
 TGJU_URL="https://call5.tgju.org/ajax.json"
 CACHE_DIR="${CHAND_CACHE_DIR:-$HOME/.cache/omarchy-chand}"
 HISTORY_DIR="$CACHE_DIR/history"
-MAX_POINTS=5000
-MAX_DAYS=90
-# Long-range sampling: when a requested range spans more than this many
-# months, we bucket the (already-capped at 5000) points down to ~this many
-# representative samples so a 5Y / all-time chart stays readable and we don't
-# blow past the consumer's memory.
-MAX_MONTHS=400
+MAX_POINTS=8000
+
+mkdir -p "$HISTORY_DIR" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# Asset table: key -> source + remote symbol/key.
+#   src "wallex" : wallex symbol (USDTTMN, BTCUSDT, XAUTUSDT, ...)
+#   src "tgju"   : tgju current key (price_eur, sekee, ...)
+# ---------------------------------------------------------------------------
+wallex_sym() { # key -> wallex symbol (empty if not wallex)
+  case "$1" in
+    price_dollar_rl) echo "USDTTMN" ;;       # live USD in Toman
+    crypto-bitcoin)  echo "BTCUSDT" ;;
+    crypto-ethereum) echo "ETHUSDT" ;;
+    crypto-tether)   echo "USDTTMN" ;;       # Tether ~ USD in Toman
+    crypto-ripple)   echo "XRPUSDT" ;;
+    crypto-litecoin) echo "LTCUSDT" ;;
+    crypto-eos)      echo "" ;;              # not listed on Wallex; falls to tgju
+    crypto-binance-coin) echo "BNBUSDT" ;;
+    gerami)          echo "XAUTUSDT" ;;      # gold token proxy for "1g gold coin"
+    *) echo "" ;;
+  esac
+}
+tgju_key() { # key -> tgju key (empty if not tgju)
+  local w; w="$(wallex_sym "$1")"
+  [ -n "$w" ] && { echo ""; return; }
+  case "$1" in
+    price_dollar_rl|price_eur|price_gbp|price_aed|price_try|price_chf|price_sek|price_nok|price_dkk|price_sgd|price_cad|price_aud|price_cny|price_jpy|price_hkd|price_inr|price_myr|price_thb|price_rub|price_qar|price_omr|price_kwd|price_sar|price_iqd|price_bhd|price_azn|price_amd|price_afn|geram18|geram24|mesghal|sekee|sekeb|nim|rob) echo "$1" ;;
+    crypto-eos) echo "crypto-eos" ;;
+    crypto-binance-coin) echo "crypto-binance-coin" ;;
+    *) echo "" ;;
+  esac
+}
+src_of() {
+  local w; w="$(wallex_sym "$1")"
+  [ -n "$w" ] && { echo "wallex"; return; }
+  local t; t="$(tgju_key "$1")"
+  [ -n "$t" ] && { echo "tgju"; return; }
+  echo "unknown"
+}
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
 die() {
-  # Always emit a JSON error so the caller can parse one object.
   printf '{"ok":false,"error":%s}\n' "$(jq -nc --arg m "$1" '$m')" >&2
   printf '{"ok":false,"error":%s}\n' "$(jq -nc --arg m "$1" '$m')"
   exit 0
 }
 
-# Strip thousands separators and coerce to a number jq understands.
-num() {
-  local s="$1"
-  s="${s//,/}"
-  # jq tonumber will validate; pass through.
-  printf '%s' "$s"
-}
+num() { printf '%s' "${1//,/}"; }
 
-# Tehran now (seconds since epoch) — day boundary is Tehran local date.
-tehran_epoch() {
-  TZ=Asia/Tehran date +%s
-}
+tehran_epoch() { TZ=Asia/Tehran date +%s; }
+tehran_date()  { TZ=Asia/Tehran date +%Y-%m-%d; }
 
-tehran_date() {
-  TZ=Asia/Tehran date +%Y-%m-%d
-}
-
-cache_file() {
-  printf '%s/%s.jsonl' "$HISTORY_DIR" "$1"
-}
-
-mkdir -p "$HISTORY_DIR" 2>/dev/null || true
+cache_file() { printf '%s/%s.jsonl' "$HISTORY_DIR" "$1"; }
 
 # ---------------------------------------------------------------------------
-# fetch the live ajax.json (cached in-memory for a single invocation)
+# raw fetches (memoized within one invocation)
 # ---------------------------------------------------------------------------
 
-RAW=""
-fetch_raw() {
-  if [ -n "$RAW" ]; then return 0; fi
-  RAW="$(curl -fsS --max-time 12 -A "$UA" "$TGJU_URL" 2>/dev/null)" || return 1
-  if [ -z "$RAW" ]; then return 1; fi
-  # cheap validity check
-  printf '%s' "$RAW" | jq -e '.current' >/dev/null 2>&1 || return 1
+WALLEX_RAW=""
+fetch_wallex() {
+  [ -n "$WALLEX_RAW" ] && return 0
+  WALLEX_RAW="$(curl -fsS --max-time 12 -A "$UA" "$WALLEX_URL" 2>/dev/null)" || return 1
+  printf '%s' "$WALLEX_RAW" | jq -e '.result.symbols' >/dev/null 2>&1 || return 1
+  return 0
+}
+
+TGJU_RAW=""
+fetch_tgju() {
+  [ -n "$TGJU_RAW" ] && return 0
+  TGJU_RAW="$(curl -fsS --max-time 12 -A "$UA" "$TGJU_URL" 2>/dev/null)" || return 1
+  printf '%s' "$TGJU_RAW" | jq -e '.current' >/dev/null 2>&1 || return 1
   return 0
 }
 
 # ---------------------------------------------------------------------------
-# history cache: append-only, capped at MAX_POINTS / MAX_DAYS.
-# One line per fetch: {"ts":<epoch>, "toman":<number>}
+# history cache (append-only, capped)
 # ---------------------------------------------------------------------------
 
 append_history() {
@@ -91,120 +113,83 @@ append_history() {
   [ -z "$toman" ] && return
   local f; f="$(cache_file "$key")"
   printf '{"ts":%s,"toman":%s}\n' "$ts" "$toman" >>"$f" 2>/dev/null || return
-
-  # Cap by count (keep the most recent MAX_POINTS lines).
-  local lines
-  lines="$(wc -l <"$f" 2>/dev/null || echo 0)"
+  local lines; lines="$(wc -l <"$f" 2>/dev/null || echo 0)"
   if [ "$lines" -gt "$MAX_POINTS" ]; then
     tail -n "$MAX_POINTS" "$f" >"$f.tmp" 2>/dev/null && mv "$f.tmp" "$f"
-  fi
-
-  # Cap by age: drop points older than MAX_DAYS Tehran-days.
-  local cutoff
-  cutoff="$(( $(tehran_epoch) - MAX_DAYS * 86400 ))"
-  if [ "$lines" -gt 1 ]; then
-    awk -v c="$cutoff" '$0 !~ /^[[:space:]]*$/ && ($0 | getline _tmp) ' "$f" >/dev/null 2>&1
-    # awk filter below is safer:
-    awk -v c="$cutoff" '
-      match($0,/"ts":([0-9]+)/,m) && (m[1]+0) >= c { print }
-    ' "$f" >"$f.tmp" 2>/dev/null && mv "$f.tmp" "$f"
   fi
 }
 
 # ---------------------------------------------------------------------------
-# resolve a key's live Toman value from the raw payload
-# echoes: <toman> <rial> <change_pct> <change_toman> <high_toman> <low_toman> \
-#         <buy_toman_or_null> <sell_toman_or_null> <source>
+# resolvers -> prints: toman rial change_pct change_toman high_toman low_toman buy sell src
 # ---------------------------------------------------------------------------
 
-resolve() {
+resolve_wallex() {
+  local sym="$1"
+  local s; s="$(printf '%s' "$WALLEX_RAW" | jq -c --arg s "$sym" '.result.symbols[$s] // empty')"
+  [ -z "$s" ] && { printf 'ERR:missing:%s' "$sym"; return 1; }
+  local last high low ch
+  last="$(printf '%s' "$s" | jq -r '.stats.lastPrice // "0"')"
+  high="$(printf '%s' "$s" | jq -r '.stats["24h_highPrice"] // "0"')"
+  low="$(printf '%s' "$s" | jq -r '.stats["24h_lowPrice"] // "0"')"
+  ch="$(printf '%s' "$s" | jq -r '.stats["24h_ch"] // "0"')"
+  last="$(num "$last")"; high="$(num "$high")"; low="$(num "$low")"; ch="$(num "$ch")"
+  [ "$last" = "0" ] && { printf 'ERR:zero:%s' "$sym"; return 1; }
+  local toman change_t
+  toman="$last"
+  change_t="$(awk -v t="$toman" -v p="$ch" 'BEGIN{printf "%.2f", t*p/100}')"
+  printf '%s %s %s %s %s %s %s %s %s' \
+    "$toman" "$toman" "$ch" "$change_t" "$high" "$low" "$toman" "$toman" "wallex"
+  return 0
+}
+
+resolve_tgju() {
   local key="$1"
   local entry
-  entry="$(printf '%s' "$RAW" | jq -c --arg k "$key" '.current[$k] // empty')"
-  [ -z "$entry" ] && { printf '%s' "ERR:missing:$key"; return 1; }
-
-  # Crypto keys are quoted in USD on TGJU.
-  local is_crypto="false"
-  case "$key" in crypto-*) is_crypto="true";; esac
-
-  if [ "$is_crypto" = "true" ]; then
-    local usd p_usd rate
-    usd="$(printf '%s' "$entry" | jq -r '.p // "0"')"
-    usd="$(num "$usd")"
-    p_usd="$(printf '%s' "$RAW" | jq -r '.current.price_dollar_rl.p // "0"')"
-    p_usd="$(num "$p_usd")"
-    rate="$(awk -v u="$usd" -v r="$p_usd" 'BEGIN{printf "%.4f", u*r}')"
-    # rial = usd * price_dollar_rl ; toman = /10
-    local rial toman
-    rial="$(awk -v r="$rate" 'BEGIN{printf "%.0f", r}')"
-    toman="$(awk -v r="$rate" 'BEGIN{printf "%.2f", r/10}')"
-
-    local dp d h l
-    dp="$(printf '%s' "$entry" | jq -r '.dp // 0')"
-    d="$(printf '%s' "$entry" | jq -r '.d // "0"')"
-    d="$(num "$d")"
-    h="$(printf '%s' "$entry" | jq -r '.h // "0"')"
-    l="$(printf '%s' "$entry" | jq -r '.l // "0"')"
-    h="$(num "$h")"; l="$(num "$l")"
-    local high_toman low_toman
-    high_toman="$(awk -v r="$rate" 'BEGIN{printf "%.2f", (r/10)}')" # crypto has no separate h/l in USD units mapped; approximate
-    low_toman="$high_toman"
-    local change_toman
-    # change_toman = dp (%)/100 * toman
-    change_toman="$(awk -v t="$toman" -v p="$dp" 'BEGIN{printf "%.2f", t*p/100}')"
-    printf '%s %s %s %s %s %s %s %s %s' \
-      "$toman" "$rial" "$dp" "$change_toman" "$high_toman" "$low_toman" "null" "null" "tgju-crypto"
-    return 0
-  fi
-
-  local p d dp h l buy sell
+  entry="$(printf '%s' "$TGJU_RAW" | jq -c --arg k "$key" '.current[$k] // empty')"
+  [ -z "$entry" ] && { printf 'ERR:missing:%s' "$key"; return 1; }
+  local p d dp h l
   p="$(printf '%s' "$entry" | jq -r '.p // "0"')"; p="$(num "$p")"
   d="$(printf '%s' "$entry" | jq -r '.d // "0"')"; d="$(num "$d")"
   dp="$(printf '%s' "$entry" | jq -r '.dp // 0')"
   h="$(printf '%s' "$entry" | jq -r '.h // "0"')"; h="$(num "$h")"
   l="$(printf '%s' "$entry" | jq -r '.l // "0"')"; l="$(num "$l")"
-  # buy/sell: TGJU sometimes provides *_buy / *_sell siblings; fall back to null.
-  buy="$(printf '%s' "$RAW" | jq -r --arg k "${key}_buy" '.current[$k].p // empty')"
-  sell="$(printf '%s' "$RAW" | jq -r --arg k "${key}_sell" '.current[$k].p // empty')"
-  [ -n "$buy" ] && buy="$(awk -v r="$(num "$buy")" 'BEGIN{printf "%.2f", r/10}')" || buy="null"
-  [ -n "$sell" ] && sell="$(awk -v r="$(num "$sell")" 'BEGIN{printf "%.2f", r/10}')" || sell="null"
-
-  local rial toman high_toman low_toman change_toman
-  rial="$(awk -v r="$p" 'BEGIN{printf "%.0f", r}')"
-  toman="$(awk -v r="$p" 'BEGIN{printf "%.2f", r/10}')"
-  high_toman="$(awk -v r="$h" 'BEGIN{printf "%.2f", r/10}')"
-  low_toman="$(awk -v r="$l" 'BEGIN{printf "%.2f", r/10}')"
+  # crypto on TGJU is USD -> convert via live USDTTMN rate.
+  case "$key" in crypto-*)
+    fetch_wallex || { printf 'ERR:nowallex'; return 1; }
+    local usd rate toman2
+    usd="$(printf '%s' "$entry" | jq -r '.p // "0"')"; usd="$(num "$usd")"
+    rate="$(printf '%s' "$WALLEX_RAW" | jq -r '.result.symbols.USDTTMN.stats.lastPrice // "0"')"
+    rate="$(num "$rate")"
+    toman2="$(awk -v u="$usd" -v r="$rate" 'BEGIN{printf "%.2f", u*r}')"
+    p="$toman2"; h="$toman2"; l="$toman2"
+  esac
+  local toman rial high_toman low_toman change_toman
+  toman="$p"; rial="$(awk -v r="$p" 'BEGIN{printf "%.0f", r}')"
+  high_toman="$h"; low_toman="$l"
   change_toman="$(awk -v r="$d" 'BEGIN{printf "%.2f", r/10}')"
-
   printf '%s %s %s %s %s %s %s %s %s' \
-    "$toman" "$rial" "$dp" "$change_toman" "$high_toman" "$low_toman" "$buy" "$sell" "tgju"
+    "$toman" "$rial" "$dp" "$change_toman" "$high_toman" "$low_toman" "null" "null" "tgju"
   return 0
+}
+
+resolve() {
+  local key="$1" src; src="$(src_of "$key")"
+  case "$src" in
+    wallex) fetch_wallex || return 1; resolve_wallex "$(wallex_sym "$key")" ;;
+    tgju)   fetch_tgju   || return 1; resolve_tgju   "$(tgju_key "$key")" ;;
+    *) { printf 'ERR:unknown:%s' "$key"; return 1; } ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
 # current
 # ---------------------------------------------------------------------------
 
-# Build one item JSON for a key. Prints to stdout (the line for the items array).
 emit_item() {
   local key="$1"
-  if ! fetch_raw; then
-    local f; f="$(cache_file "$key")"
-    if [ -f "$f" ]; then
-      local last; last="$(tail -n 1 "$f" 2>/dev/null)"
-      if [ -n "$last" ]; then
-        printf '%s' "$(jq -nc --arg key "$key" --argjson c "$(printf '%s' "$last" | jq -c '{toman:(.toman), ts:(.ts)}')" \
-          '{ok:true, key:$key, offline:true, source:"cache", toman:$c.toman, change_pct:null, change_toman:null, fetched_at:(($c.ts)|tostring)}')"
-        return
-      fi
-    fi
-    printf '%s' "$(jq -nc --arg key "$key" '{ok:false, key:$key, error:"network unavailable and no cache"}')"
-    return
-  fi
-
   local res; res="$(resolve "$key")"
   if [ $? -ne 0 ] || [ -z "$res" ]; then
-    printf '%s' "$(jq -nc --arg key "$key" '{ok:false, key:$key, error:"key not found"}')"
+    printf '%s' "$(jq -nc --arg key "$key" '{ok:false, key:$key, error:"unresolved"}')"
     return
   fi
   local toman rial dp change_toman high low buy sell src
@@ -214,42 +199,31 @@ emit_item() {
   append_history "$key" "$toman" "$ts"
 
   jq -nc \
-    --arg key "$key" \
+    --arg key "$key" --arg src "$src" \
     --argjson toman "$toman" --argjson rial "$rial" \
     --argjson change_pct "$dp" --argjson change_toman "$change_toman" \
     --argjson high_toman "$high" --argjson low_toman "$low" \
-    --arg buy "$buy" --arg sell "$sell" --arg src "$src" \
+    --arg buy "$buy" --arg sell "$sell" \
     --arg fa "$(tehran_date)" \
     '{
-      ok: true,
-      key: $key,
-      toman: $toman,
-      rial: $rial,
-      change_pct: $change_pct,
-      change_toman: $change_toman,
-      high_toman: $high_toman,
-      low_toman: $low_toman,
-      buy_toman: (if $buy == "null" then null else ($buy|tonumber) end),
-      sell_toman: (if $sell == "null" then null else ($sell|tonumber) end),
-      source: $src,
-      tehran_date: $fa,
-      fetched_at: (now|todate)
-    }'
+      ok:true, key:$key, source:$src,
+      toman:$toman, rial:$rial,
+      change_pct:$change_pct, change_toman:$change_toman,
+      high_toman:$high_toman, low_toman:$low_toman,
+      buy_toman:(if $buy=="null" then null else ($buy|tonumber) end),
+      sell_toman:(if $sell=="null" then null else ($sell|tonumber) end),
+      tehran_date:$fa, fetched_at:(now|todate)
+    }' \
+    | jq -c '(.. | numbers) |= (if . == floor then (.|floor) else ((. * 100 | round) / 100) end)'
 }
 
 cmd_current() {
   local keys=("$@")
   [ "${#keys[@]}" -eq 0 ] && die "current requires at least one key"
-
-  local items=""
-  local sep=""
+  local items="" sep=""
   for k in "${keys[@]}"; do
-    local it
-    it="$(emit_item "$k")"
-    items="${items}${sep}${it}"
-    sep=","
+    items="${items}${sep}$(emit_item "$k")"; sep=","
   done
-
   printf '{"ok":true,"items":[%s]}\n' "$items"
 }
 
@@ -259,81 +233,85 @@ cmd_current() {
 
 range_days() {
   case "$1" in
-    1d) echo 1;; 1w) echo 7;; 1m) echo 30;; 3m) echo 90;; 6m) echo 180;; 1y) echo 365;; 5y) echo 1825;; all) echo 36500;;
+    1d) echo 1;; 1w) echo 7;; 1y) echo 365;; 5y) echo 1825;; all) echo 36500;;
     *) echo 30;;
   esac
 }
 
+# Wallex klines: real daily closes -> proper ups/downs.
+fetch_wallex_klines() {
+  local sym="$1" from="$2" to="$3"
+  curl -fsS --max-time 15 -A "$UA" \
+    "https://api.wallex.ir/v1/udf/history?symbol=$sym&resolution=D&from=$from&to=$to" 2>/dev/null
+}
+
 cmd_history() {
-  local key="$1" range="${2:-1m}"
+  local key="$1" range="${2:-1y}"
   [ -z "$key" ] && die "history requires a key"
-
-  # Ensure we have a current snapshot appended.
-  cmd_current "$key" >/dev/null 2>&1 || true
-
+  local src; src="$(src_of "$key")"
+  local now; now="$(date +%s)"
   local days; days="$(range_days "$range")"
-  local f; f="$(cache_file "$key")"
-  if [ ! -f "$f" ]; then
-    die "no history cached for $key"
+  local cutoff=$(( now - days * 86400 ))
+  # Lower bound: year 2000. Avoids a negative epoch (which overflows the
+  # curl/jq call) and Wallex has no data before 2018 anyway.
+  [ "$cutoff" -lt 946684800 ] && cutoff=946684800
+  local series="[]" meta="null"
+
+  if [ "$src" = "wallex" ]; then
+    local sym; sym="$(wallex_sym "$key")"
+    [ -z "$sym" ] && sym="$(printf '%s' "$key" | sed 's/^price_dollar_rl$/USDTTMN/')"
+    local kl; kl="$(fetch_wallex_klines "$sym" "$cutoff" "$now")"
+    if [ -n "$kl" ]; then
+      series="$(printf '%s' "$kl" | jq -c '
+        if (.s // "") == "ok" and (.t | type) == "array" then
+          [ range(0; .t | length) as $i | {ts:(.t[$i] | floor), toman:(.c[$i] | tonumber)} ]
+        else [] end')"
+    fi
   fi
 
-  local cutoff
-  cutoff="$(( $(tehran_epoch) - days * 86400 ))"
+  # If Wallex gave nothing (or non-wallex asset), fall back to the append-only
+  # local cache (no real history API for TGJU assets).
+  if [ "$(printf '%s' "$series" | jq -r 'length')" -eq 0 ]; then
+    cmd_current "$key" >/dev/null 2>&1 || true
+    local f; f="$(cache_file "$key")"
+    [ -f "$f" ] && series="$(awk -v c="$cutoff" '
+      match($0,/"ts":([0-9]+)/,m) && match($0,/"toman":([0-9.]+)/,n) && (m[1]+0) >= c {
+        printf "{\"ts\":%s,\"toman\":%s}\n", m[1], n[1]
+      }' "$f" | jq -s 'sort_by(.ts)')"
+  fi
 
-  # All cached points within range (the cache is append-only & already
-  # capped at MAX_POINTS/MAX_DAYS, so this is the honest history we have).
-  local full
-  full="$(awk -v c="$cutoff" '
-    match($0,/"ts":([0-9]+)/,m) && match($0,/"toman":([0-9.]+)/,n) && (m[1]+0) >= c {
-      printf "{\"ts\":%s,\"toman\":%s}\n", m[1], n[1]
-    }' "$f" | jq -s 'sort_by(.ts)')"
-
-  # Bucket long ranges down to ~MAX_MONTHS samples so 5Y / all-time charts
-  # stay readable and cheap. We keep the first and last point always, and
-  # evenly thin the middle.
-  local series
-  series="$(printf '%s' "$full" | jq -c --argjson cap "$MAX_MONTHS" '
-    if length <= ($cap + 2) then .
-    else
-      (length - 2) as $mid
-      | ($cap / $mid) as $step
-      | (reduce range(0; length) as $i ([];
-          if $i == 0 or $i == (length-1) or (($i % (1/($step))) < 1) then . + [.[$i]] else . end))
-    end')"
-
-  # Honest summary computed from the actual series: from=first, to=last,
-  # high/low over the range, range_delta = last - first (the real move over
-  # the window). For 1D this matches the live TGJU d/dp; for longer ranges it
-  # is the move from the earliest available point to now.
-  local meta
+  # Honest summary from the series (first/last, min/max, range delta).
   meta="$(printf '%s' "$series" | jq -c '
     if length == 0 then
-      {points:0, high:null, low:null, from:null, to:null, jalali_from:"", jalali_to:"", start:null, end:null}
+      {points:0, high:null, low:null, from:null, to:null, jalali_from:"", jalali_to:"", range_delta:null}
     else
       (map(.toman) | {high:(max), low:(min)}) as $hl
-      | (.[0].ts) as $from
-      | (.[-1].ts) as $to
-      | (.[-1].toman - .[0].toman) as $range_delta
-      | {
-          points: length,
-          high: $hl.high, low: $hl.low,
-          from: $from, to: $to,
-          range_delta: $range_delta,
-          jalali_from: ($from | strftime("%Y-%m-%d")),
-          jalali_to:   ($to   | strftime("%Y-%m-%d"))
-        }
+      | (.[0].ts) as $from | (.[-1].ts) as $to
+      | (.[-1].toman - .[0].toman) as $rd
+      | {points:length, high:$hl.high, low:$hl.low, from:$from, to:$to,
+         range_delta:$rd,
+         jalali_from:($from|strftime("%Y-%m-%d")),
+         jalali_to:($to|strftime("%Y-%m-%d"))}
     end')"
 
-  # "all" means "everything we have" — report the real coverage window.
   local eff_range="$range"
   if [ "$range" = "all" ]; then
-    local span_days
-    span_days="$(printf '%s' "$meta" | jq -r 'if .points>0 then ((.to - .from)/86400|floor|tostring) else "0" end')"
-    eff_range="all(${span_days}d)"
+    local span; span="$(printf '%s' "$meta" | jq -r 'if .points>0 then ((.to-.from)/86400|floor|tostring) else "0" end')"
+    eff_range="all(${span}d)"
   fi
 
-  jq -nc --arg key "$key" --arg range "$eff_range" --argjson series "$series" --argjson meta "$meta" \
-    '{ok:true, key:$key, range:$range, series:$series, summary:$meta}'
+  # Write the (potentially large) series to a temp file and read it back via
+  # --slurpfile instead of --argjson, which fails with "Argument list too long"
+  # for multi-year ranges (~150KB of kline points).
+  local serfile; serfile="$(mktemp)"
+  printf '%s' "$series" >"$serfile"
+
+  jq -nc --arg key "$key" --arg range "$eff_range" \
+    --slurpfile series "$serfile" --argjson meta "$meta" \
+    '{ok:true, key:$key, range:$range, series:$series[0], summary:$meta}' \
+    | jq -c '(.. | numbers) |= (if . == floor then (.|floor) else ((. * 100 | round) / 100) end)'
+
+  rm -f "$serfile"
 }
 
 # ---------------------------------------------------------------------------
@@ -342,6 +320,6 @@ cmd_history() {
 
 case "${1:-}" in
   current) shift; cmd_current "$@";;
-  history) cmd_history "${2:-}" "${3:-1m}";;
-  *) die "usage: fetch-chand current <key> [<key>...] | fetch-chand history <key> [1d|1w|1m|3m|6m|1y]";;
+  history) cmd_history "${2:-}" "${3:-1y}";;
+  *) die "usage: fetch-chand current <key> [<key>...] | fetch-chand history <key> [1d|1w|1y|5y|all]";;
 esac

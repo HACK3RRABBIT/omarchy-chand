@@ -1,17 +1,19 @@
 # Chand — Iran free-market rates on the Omarchy bar
 
 A first-party-quality Omarchy Quattro bar widget that shows Iran's free-market
-(TGJU) rates in **Toman**, like the iOS app [Chand](https://apps.apple.com/us/app/chand/id1524200188).
+rates in **Toman**, like the iOS app [Chand](https://apps.apple.com/us/app/chand/id1524200188).
 
 - **Bar pill** — `USD  206,200 T  ▲2.33%` (compact mode: `206.2k T ▲2.33%`).
   Colors follow the spec exactly: up `#22c55e`, down `#ef4444`, flat = bar
   foreground. Fetch errors use `Color.urgent`; stale/offline dims to 0.5 with a
   `↺`. Left-click toggles the panel, middle refreshes, right-click toggles
   compact. Click the Detail price to copy it.
+  The bar pill always shows **USD only** (the default currency; nothing else
+  can be set on the bar). Add gold/crypto/currencies to the panel watchlist.
 - **Watchlist** — scrollable list of assets you added; tap a row for Detail
   (and set it as the bar primary), `✕` removes just that row.
 - **Detail** — big Toman price, colored Δ% + Δ T, buy/sell (only when both
-  exist and differ), range chips (`1D 1W 1M 3M 6M 1Y`), an area chart, a Jalali
+  exist and differ), range chips (`1D 1W 1Y 5Y All`), an area chart, a Jalali
   from→to summary (high / low / range Δ), and a converter on this screen only.
 - **Catalog** — searchable, grouped add screen (Currencies / Gold & coins /
   Crypto). Already-added rows show a checkmark; tap adds and stays open for
@@ -19,14 +21,23 @@ A first-party-quality Omarchy Quattro bar widget that shows Iran's free-market
 
 ## Data
 
-- Primary source: `https://call5.tgju.org/ajax.json` (TGJU free-market rates).
+- **Hybrid, real-time sources** (mirrors the Chand iOS app):
+  - **Wallex** `https://api.wallex.ir/v1/markets` — real-time USD (`USDTTMN`),
+    crypto (`BTCUSDT`…), gold tokens (`XAUTUSDT`/`PAXGUSDT`), and **all chart
+    history** via its klines endpoint (`/v1/udf/history`, 1D–5Y+ daily closes).
+    This is the fast, live, accurate path the iPhone Chand app uses.
+  - **TGJU** `https://call5.tgju.org/ajax.json` — breadth only: fiat currencies
+    (EUR, GBP, AED…) and physical coins (Azadi, Emami, geram18…) that Wallex
+    does not list. Daily snapshot, so its change is often 0.
 - No ECB / Yahoo / NIMA / SANA. No third-party TGJU proxy.
-- Currencies & gold: Toman = rial ÷ 10. Crypto (quoted in USD on TGJU):
-  Toman = `usd × price_dollar_rl ÷ 10`.
-- Polls the primary every 90s; other watchlist symbols every 3rd tick.
-- Append-only history cache at `~/.cache/omarchy-chand/history/<key>.jsonl`
-  (capped at 5000 points / 90 days, Tehran day boundary). Offline falls back to
-  the last cached snapshot.
+- USD / crypto / gold tokens: Toman straight from Wallex. TGJU fiat & coins:
+  Toman = rial ÷ 10; TGJU crypto (not on Wallex): Toman = `usd × USDTTMN ÷ 1`.
+- Polls every 90s; the full watchlist + open detail are fetched each tick and
+  merged into the snapshot so rows never blink or reset.
+- History cache at `~/.cache/omarchy-chand/history/<key>.jsonl` (append-only,
+  capped at 8000 points, Tehran day boundary). Wallex klines backfill real
+  ups/downs; TGJU-only assets fall back to the local cache. Offline uses the
+  last cached snapshot.
 - All fetching runs off the UI thread via `Process` + `StdioCollector` (one
   `curl` + `jq` call per refresh), exactly like the first-party weather widget.
 

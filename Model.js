@@ -114,12 +114,10 @@ function defaultSettings() {
     primary: "price_dollar_rl",
     // Watchlist (panel) asset keys, in order.
     symbols: [
-      "price_dollar_rl", "price_eur", "price_aed",
-      "geram18", "sekee", "gerami",
-      "crypto-tether", "crypto-bitcoin"
+      "price_dollar_rl"
     ],
     // Selected chart range for Detail.
-    range: "1m",
+    range: "1y",
     // Compact bar pill (right-click toggles too).
     compact: false
   }

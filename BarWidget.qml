@@ -113,9 +113,11 @@ BarWidget {
   }
 
   function setPrimary(key) {
-    var entry = { id: root.moduleName, compact: root.compact, range: (root.settings ? root.settings.range : "1m") }
+    // Bar primary is locked to USD per product spec (the default currency
+    // shown is ONLY USD; nothing else can be set). Tap a watchlist row to
+    // open its Detail, but the bar pill stays on USD.
+    var entry = { id: root.moduleName, compact: root.compact, range: (root.settings ? root.settings.range : "1y"), primary: "price_dollar_rl" }
     for (var k in root.settings) if (k !== "id" && k !== "primary") entry[k] = root.settings[k]
-    entry.primary = key
     root.settings = entry
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
       root.bar.shell.updateEntryInline(root.moduleName, entry)
@@ -168,6 +170,7 @@ BarWidget {
     labelVisible: true
     hasVisualContent: text !== ""
     fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+    fontSize: root.compact ? Style.font.body : Style.font.bodySmall
     foreground: root.pillColor
     useActiveColor: false
     tooltipText: "Chand — click to open, middle to refresh, right-click for compact"

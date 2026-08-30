@@ -76,10 +76,12 @@ Panel {
     persist(buildEntry({}))
   }
   function setPrimary(key) {
+    // Bar primary is locked to USD (product spec: only USD on the bar, nothing
+    // else can be set). Still persist the rest and open Detail for this key.
     var e = buildEntry({})
-    e.primary = key
+    e.primary = "price_dollar_rl"
     persist(e)
-    if (root.hostWidget && typeof root.hostWidget.setPrimary === "function") root.hostWidget.setPrimary(key)
+    if (root.hostWidget && typeof root.hostWidget.setPrimary === "function") root.hostWidget.setPrimary("price_dollar_rl")
   }
   function setSymbols(syms) {
     var e = buildEntry({})
