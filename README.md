@@ -3,12 +3,15 @@
 A first-party-quality Omarchy Quattro bar widget that shows Iran's free-market
 rates in **Toman**, like the iOS app [Chand](https://apps.apple.com/us/app/chand/id1524200188).
 
-- **Bar pill** — just the **live USD price in Toman**, colored **green when
-  up / red when down** (up `#22c55e`, down `#ef4444`). No currency code, no
-  change %. Stale/offline dims to 0.5 with a `↺`; fetch error shows `✕`.
-  Left-click toggles the panel, middle (or the panel's ↻ button) refreshes,
-  right-click toggles compact (full vs. `205.1k` style). The bar always shows
-  **USD only** (the default currency; nothing else can be set). Add
+- **Bar pill** — just the **live USD price in Toman**, colored by the **5-minute
+  tick**: green when the price is **up vs the last poll (~5 min ago)**, red when
+  **down vs the last poll** (up `#22c55e`, down `#ef4444`), flat = bar foreground.
+  This is the at-a-glance up/down, *independent of any chart range*. The chart's
+  1D/1W/1M/… Δ is computed separately from the range's own first→current price.
+  No currency code, no %. Stale/offline dims to 0.5 with a `↺`; fetch error
+  shows `✕`. Left-click toggles the panel, middle (or the panel's ↻ button)
+  refreshes, right-click toggles compact (full vs. `205.1k` style). The bar
+  always shows **USD only** (the default currency; nothing else can be set). Add
   gold/crypto/currencies to the panel watchlist.
 - **Watchlist** — scrollable list of assets you added; tap a row for Detail,
   `✕` removes just that row. (USD stays on the bar regardless — it is the locked

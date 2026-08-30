@@ -44,11 +44,13 @@ BarWidget {
   readonly property bool isStale: hasData && primaryState.offline === true
   readonly property bool isError: !!primaryState && primaryState.ok === false
 
-  // Effective foreground color for the pill.
+  // Effective foreground color for the pill. Color reflects the price tick
+  // vs the previous 5-minute poll (tick_dir), not the chart range's delta:
+  // up vs 5 min ago = green, down = red, flat = bar foreground.
   readonly property color pillColor: {
     if (root.isError) return Color.urgent
     if (!root.hasData) return root.flatColor
-    var dir = Model.direction(primaryState.change_pct)
+    var dir = (primaryState && primaryState.tick_dir) ? primaryState.tick_dir : "flat"
     if (dir === "up") return root.upColor
     if (dir === "down") return root.downColor
     return root.flatColor

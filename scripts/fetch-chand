@@ -137,6 +137,22 @@ append_history() {
   fi
 }
 
+# 5-minute-tick reference: the latest cached price from ~5 minutes
+# before *this* poll. append_history() just appended the current point, so we
+# skip the last line and take the most recent point older than 5 min.
+prev_tick_toman() {
+  local key="$1" f; f="$(cache_file "$key")"
+  [ -f "$f" ] || { printf ''; return; }
+  awk -v now="$(date +%s)" -v win=300 '
+    match($0,/"ts":([0-9]+)/,m) && match($0,/"toman":([0-9.]+)/,n) {
+      t=(m[1]+0); v=(n[1]+0)
+      if ((now - t) > win && (now - t) < (win*20)) cand=v
+    }
+    END { if (cand != "") printf "%s", cand }
+  ' "$f"
+}
+
+
 # ---------------------------------------------------------------------------
 # resolvers -> prints: toman rial change_pct change_toman high_toman low_toman buy sell src
 # ---------------------------------------------------------------------------
@@ -233,6 +249,16 @@ emit_item() {
   read -r toman rial dp change_toman high low buy sell src <<<"$res"
 
   local ts; ts="$(tehran_epoch)"
+  # 5-minute tick: price vs the cached point ~5 min ago (before this poll's
+  # own append). Drives the live pill color (up=green/down=red vs 5 min ago),
+  # which is independent of any chart range's delta.
+  local prev; prev="$(prev_tick_toman "$key")"
+  local tick_dir="flat" tick_delta="0"
+  if [ -n "$prev" ] && [ "$prev" != "0" ]; then
+    tick_delta="$(awk -v a="$prev" -v b="$toman" 'BEGIN{printf "%.2f", b-a}')"
+    if awk -v d="$tick_delta" 'BEGIN{exit !(d>0)}'; then tick_dir="up"
+    elif awk -v d="$tick_delta" 'BEGIN{exit !(d<0)}'; then tick_dir="down"; fi
+  fi
   append_history "$key" "$toman" "$ts"
 
   jq -nc \
@@ -240,12 +266,14 @@ emit_item() {
     --argjson toman "$toman" --argjson rial "$rial" \
     --argjson change_pct "$dp" --argjson change_toman "$change_toman" \
     --argjson high_toman "$high" --argjson low_toman "$low" \
+    --argjson tick_delta "$tick_delta" --arg tick_dir "$tick_dir" \
     --arg buy "$buy" --arg sell "$sell" \
     --arg fa "$(tehran_date)" \
     '{
       ok:true, key:$key, source:$src,
       toman:$toman, rial:$rial,
       change_pct:$change_pct, change_toman:$change_toman,
+      tick_delta:$tick_delta, tick_dir:$tick_dir,
       high_toman:$high_toman, low_toman:$low_toman,
       buy_toman:(if $buy=="null" then null else ($buy|tonumber) end),
       sell_toman:(if $sell=="null" then null else ($sell|tonumber) end),
