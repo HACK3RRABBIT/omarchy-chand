@@ -1,0 +1,14 @@
+# OS / editor
+.DS_Store
+*.swp
+*~
+
+# Local runtime cache (history jsonl) — not part of the plugin source.
+# The plugin writes here at runtime; keep it out of git.
+.cache/
+*.jsonl
+
+# Node / python (we use none, but guard anyway)
+node_modules/
+__pycache__/
+*.pyc
