@@ -238,11 +238,24 @@ range_days() {
   esac
 }
 
+# Wallex kline resolution per range: intraday for short ranges so the history
+# summary reflects real hour-to-hour and day-to-day movement.
+range_res() {
+  case "$1" in
+    1d) echo 60;;   # hourly -> ~24 pts/day
+    1w) echo 60;;   # hourly -> ~168 pts/week
+    1y) echo D;;    # daily  -> ~365 pts/year
+    5y) echo D;;    # daily  -> ~1812 pts/5y
+    all) echo D;;   # daily  -> ~2754 pts/all
+    *) echo D;;
+  esac
+}
+
 # Wallex klines: real daily closes -> proper ups/downs.
 fetch_wallex_klines() {
-  local sym="$1" from="$2" to="$3"
+  local sym="$1" from="$2" to="$3" res="${4:-D}"
   curl -fsS --max-time 15 -A "$UA" \
-    "https://api.wallex.ir/v1/udf/history?symbol=$sym&resolution=D&from=$from&to=$to" 2>/dev/null
+    "https://api.wallex.ir/v1/udf/history?symbol=$sym&resolution=$res&from=$from&to=$to" 2>/dev/null
 }
 
 cmd_history() {
@@ -260,7 +273,7 @@ cmd_history() {
   if [ "$src" = "wallex" ]; then
     local sym; sym="$(wallex_sym "$key")"
     [ -z "$sym" ] && sym="$(printf '%s' "$key" | sed 's/^price_dollar_rl$/USDTTMN/')"
-    local kl; kl="$(fetch_wallex_klines "$sym" "$cutoff" "$now")"
+    local kl; kl="$(fetch_wallex_klines "$sym" "$cutoff" "$now" "$(range_res "$range")")"
     if [ -n "$kl" ]; then
       series="$(printf '%s' "$kl" | jq -c '
         if (.s // "") == "ok" and (.t | type) == "array" then

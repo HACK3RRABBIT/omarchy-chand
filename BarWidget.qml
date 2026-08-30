@@ -71,7 +71,8 @@ BarWidget {
   readonly property string label: {
     if (root.isError) return "Chand ✕"
     if (!root.hasData) return "Chand …"
-    var pct = Model.formatPercent(primaryState.change_pct)
+    // Glyph (▲/▼/▬) already encodes direction, so drop the redundant "+".
+    var pct = Model.formatPercent(primaryState.change_pct).replace(/^\+/, "")
     var tail = Model.directionGlyph(Model.direction(primaryState.change_pct)) + pct + "%"
     var stale = root.isStale ? "↺ " : ""
     return stale + root.codeText + " " + root.priceText + " " + tail

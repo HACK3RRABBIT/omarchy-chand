@@ -118,8 +118,9 @@ function defaultSettings() {
     ],
     // Selected chart range for Detail.
     range: "1y",
-    // Compact bar pill (right-click toggles too).
-    compact: false
+    // Compact bar pill (right-click toggles too). Defaults ON so the
+    // closed bar widget stays short: "USD 205.1k ▲1.48%".
+    compact: true
   }
 }
 

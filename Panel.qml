@@ -245,7 +245,7 @@ Panel {
 
   Timer {
     id: refreshTimer
-    interval: 90000
+    interval: 300000
     running: true
     repeat: true
     triggeredOnStart: true
@@ -361,6 +361,27 @@ Panel {
                 }
               }
             }
+            // Manual refresh button (↻): update prices right now, on demand.
+            Rectangle {
+              id: refreshBtn
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(22); height: Style.space(22)
+              radius: Style.cornerRadius
+              color: "transparent"
+              visible: root.surface === "watchlist" || root.surface === "detail"
+              Text {
+                anchors.centerIn: parent
+                text: "↻"
+                color: root.bar.barForeground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.title
+              }
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.refresh()
+              }
+            }
           }
 
           // ================= WATCHLIST =================
@@ -426,6 +447,7 @@ Panel {
                     id: removeBtn
                     width: Style.space(20); height: Style.space(20)
                     radius: Style.cornerRadius
+                    z: 2
                     color: "transparent"
                     Text {
                       anchors.centerIn: parent
@@ -618,41 +640,6 @@ Panel {
                     }
                   }
                 }
-              }
-            }
-
-            // Chart (or collecting-history placeholder).
-            Rectangle {
-              width: parent.width
-              height: Style.space(120)
-              radius: Style.cornerRadius
-              color: Qt.darker(root.bar.background, 1.0)
-              border.width: 1
-              border.color: Util.alpha(root.bar.barForeground, 0.08)
-              clip: true
-
-              readonly property var hist: root.detailHistory
-              readonly property var series: (hist && hist.series) ? hist.series : []
-              ChartCanvas {
-                anchors.fill: parent
-                anchors.margins: Style.space(4)
-                points: parent.series
-                color: {
-                  var s = root.detailState
-                  var d = (s && s.ok) ? Model.direction(s.change_pct) : "flat"
-                  return root.dirColor(d)
-                }
-                fill: Util.alpha(parent.color, 0.18)
-                visible: parent.series.length >= 2
-              }
-              Text {
-                visible: parent.series.length < 2
-                anchors.centerIn: parent
-                text: "Collecting history…"
-                color: Qt.darker(root.bar.barForeground, 1.5)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.italic: true
               }
             }
 
