@@ -46,7 +46,8 @@ Panel {
   property string surface: "watchlist"
   property string selectedKey: ""
   property int cursor: 0
-  property string range: (cfg.range || "1d")
+  // Range always starts (and re-starts on close) at 1d per product spec.
+  property string range: "1d"
 
   // detail fetch state (one-shot; history file is appended by the poller too)
   property var detailState: null
@@ -72,13 +73,11 @@ Panel {
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
       root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
-  // Range persists to the cache state file (NOT via updateEntryInline — that
-  // reloads the whole plugin: the panel shakes and the pill flickers). It
-  // survives close/reopen and plugin reloads without touching settings.
+  // Range is in-memory only (resets to 1d on close; never persisted via
+  // updateEntryInline, which would reload the whole plugin).
   function setRange(r) {
     if (root.range === r) return
     root.range = r
-    root.persistState()
     if (typeof chartBox !== "undefined" && chartBox) chartBox.hoverPoint = null
     if (root.selectedKey) root.fetchDetail(root.selectedKey, r)
   }
@@ -98,16 +97,14 @@ Panel {
 
   // ---- panel open/close (mirrors weather Panel) ----
   function open() {
-    // Reopening always lands on the watchlist ("menu"), even if the panel was
-    // closed while on the Detail or Catalog surface.
-    root.surface = "watchlist"
-    root.selectedKey = ""
-    root.cursor = 0
-    root.detailState = null
+    root.resetToWatchlist()
     root.controller.show()
     root.refresh()
   }
   function openFromHotkey() {
+    // Same reset as open(): reopening always lands on the watchlist with the
+    // 1d range (close() also resets — this covers host summon paths).
+    root.resetToWatchlist()
     root.controller.show()
     root.refresh()
     Qt.callLater(function () {
@@ -115,8 +112,19 @@ Panel {
     })
   }
   function close() {
+    // Closing the panel forgets where you were: next open lands on the
+    // watchlist ("menu") and every chart defaults back to 1d.
+    root.resetToWatchlist()
     setCenterHoverRevealSuppressed(false)
     root.controller.hide()
+  }
+  function resetToWatchlist() {
+    root.surface = "watchlist"
+    root.selectedKey = ""
+    root.cursor = 0
+    root.detailState = null
+    root.range = "1d"
+    if (typeof chartBox !== "undefined" && chartBox) { chartBox.hoverPoint = null; chartBox.previewPoint = null }
   }
   function toggle() {
     if (root.opened) root.close()
@@ -207,7 +215,6 @@ Panel {
     try {
       stateFile.setText(JSON.stringify({
         ts: Math.floor(Date.now() / 1000),
-        range: root.range,
         snapshot: root.snapshot
       }) + "\n")
     } catch (e) {}
@@ -218,9 +225,8 @@ Panel {
       var raw = String(stateFile.text() || "").trim()
       if (!raw) return
       var st = JSON.parse(raw)
-      var ok = { "1d": true, "1w": true, "1m": true, "1y": true, "5y": true, "all": true }
-      // Keep the user's last selected range across close/reopen (fresh installs start at 1d).
-      if (st.range && ok[st.range]) root.range = st.range
+      // Range is intentionally NOT restored: closing the panel resets every
+      // chart to 1d, and a reload starts at 1d too.
       // Restore the last price snapshot so rows and the bar pill repaint
       // immediately after any plugin reload, before the network lands.
       if (st.snapshot && typeof st.snapshot === "object") {
