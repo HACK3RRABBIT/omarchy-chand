@@ -19,7 +19,7 @@ import "Model.js" as Model
 
 BarWidget {
   id: root
-  moduleName: "io.github.HACK3RRABBIT.chand"
+  moduleName: "io.github.hack3rrabbit.chand"
 
   // Injected by the host (see Ui/BarWidget.qml).
   property var panelLoader: null
@@ -151,7 +151,7 @@ BarWidget {
   }
 
   IpcHandler {
-    target: "io.github.HACK3RRABBIT.chand"
+    target: "io.github.hack3rrabbit.chand"
 
     function open(): void { root.open() }
     function close(): void { root.close() }

@@ -91,7 +91,7 @@ From a git URL (recommended):
 
 ```bash
 omarchy plugin add https://github.com/HACK3RRABBIT/omarchy-chand --enable
-omarchy bar move io.github.HACK3RRABBIT.chand --section right
+omarchy bar move io.github.hack3rrabbit.chand --section right
 ```
 
 Or clone the repo and add it from disk:
@@ -99,13 +99,13 @@ Or clone the repo and add it from disk:
 ```bash
 git clone https://github.com/HACK3RRABBIT/omarchy-chand
 omarchy plugin add ./omarchy-chand --enable
-omarchy bar move io.github.HACK3RRABBIT.chand --section right
+omarchy bar move io.github.hack3rrabbit.chand --section right
 ```
 
 ## Remove
 
 ```bash
-omarchy plugin remove io.github.HACK3RRABBIT.chand
+omarchy plugin remove io.github.hack3rrabbit.chand
 ```
 
 Then, if you had moved it on the bar, nothing else is needed — removing the
@@ -119,10 +119,10 @@ Omarchy). No other dependencies; the plugin installs nothing system-wide.
 ## IPC
 
 ```bash
-omarchy-shell io.github.HACK3RRABBIT.chand toggle   # open / close
-omarchy-shell io.github.HACK3RRABBIT.chand open
-omarchy-shell io.github.HACK3RRABBIT.chand close
-omarchy-shell io.github.HACK3RRABBIT.chand refresh
+omarchy-shell io.github.hack3rrabbit.chand toggle   # open / close
+omarchy-shell io.github.hack3rrabbit.chand open
+omarchy-shell io.github.hack3rrabbit.chand close
+omarchy-shell io.github.hack3rrabbit.chand refresh
 ```
 
 ## Settings
@@ -137,7 +137,7 @@ which also mirrors `~/.config/omarchy/chand.json`-style fields:
 ## Repo layout
 
 ```
-manifest.json        plugin contract (id io.github.HACK3RRABBIT.chand)
+manifest.json        plugin contract (id io.github.hack3rrabbit.chand)
 BarWidget.qml        bar pill + IPC entry point (loads Panel.qml)
 Panel.qml            watchlist / detail / catalog surfaces
 ChartCanvas.qml      Canvas area chart (paints inside its bounds)

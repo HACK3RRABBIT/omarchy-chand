@@ -25,8 +25,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "io.github.HACK3RRABBIT.chand"
-  ipcTarget: "io.github.HACK3RRABBIT.chand"
+  moduleName: "io.github.hack3rrabbit.chand"
+  ipcTarget: "io.github.hack3rrabbit.chand"
   manageIpc: false
 
   property var anchorItem: null
