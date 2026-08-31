@@ -125,6 +125,7 @@ Panel {
     root.surface = "detail"
     root.cursor = 0
     root.detailState = null
+    if (typeof chartBox !== "undefined" && chartBox) { chartBox.hoverPoint = null; chartBox.previewPoint = null }
     fetchDetail(key, root.range)
   }
   function goWatchlist() {
@@ -575,26 +576,19 @@ Panel {
               width: parent.width
               elide: Text.ElideRight
             }
-            // Count-up animation: displayValue eases from its previous value
-            // toward the live Toman price whenever it changes, so the number
-            // ticks up/down like it is being loaded rather than snapping.
-            readonly property real liveToman: (parent.dSt && parent.dSt.ok) ? parent.dSt.toman : 0
-            readonly property real displayToman: priceAnim.value
-            NumberAnimation {
-              id: priceAnim
-              target: null
-              property: "value"
-              from: priceAnim.value
-              to: detailCol.liveToman
-              duration: 600
-              easing.type: Easing.OutCubic
-              running: false
+            // Count-up animation: displayToman is a plain real with a
+            // Behavior, so whenever liveToman changes the number eases from
+            // its previous value (0 on first load) to the new price — the
+            // "counting up like it is loading" effect. NumberAnimation with
+            // target:null has no value to assign, hence not that.
+            // dSt directly — `parent` here is the Column's visual parent,
+            // which has no dSt (same scope trap that zeroed dPct earlier).
+            property real liveToman: (dSt && dSt.ok) ? dSt.toman : 0
+            property real displayToman: 0
+            Behavior on displayToman {
+              NumberAnimation { duration: 600; easing.type: Easing.OutCubic }
             }
-            onLiveTomanChanged: {
-              priceAnim.to = detailCol.liveToman
-              priceAnim.from = priceAnim.value
-              priceAnim.restart()
-            }
+            onLiveTomanChanged: detailCol.displayToman = detailCol.liveToman
             Text {
               readonly property var s: parent.dSt
               text: (parent.displayToman > 0)
@@ -727,8 +721,12 @@ Panel {
               readonly property string rangeDir: (hist && hist.summary && hist.summary.points >= 2)
                 ? Model.direction(hist.summary.range_delta)
                 : ((root.detailState && root.detailState.ok) ? Model.direction(root.detailState.change_pct) : "flat")
-              // The point at the user's last click on the chart (or null).
+              // previewPoint follows the mouse (hover); hoverPoint is pinned
+              // by click. The bubble/crosshair show preview while hovering,
+              // else the pinned point.
               property var hoverPoint: null
+              property var previewPoint: null
+              readonly property var activePoint: previewPoint || hoverPoint
 
               ChartCanvas {
                 id: chart
@@ -737,7 +735,7 @@ Panel {
                 points: parent.series
                 color: root.dirColor(parent.rangeDir)
                 fill: Util.alpha(parent.color, 0.18)
-                hoverX: (parent.hoverPoint ? xAtPoint(parent.hoverPoint) : -1)
+                hoverX: (parent.activePoint ? xAtPoint(parent.activePoint) : -1)
                 visible: parent.series.length >= 2
               }
               // Click anywhere on the chart to pin the price at that moment;
@@ -745,9 +743,9 @@ Panel {
               // Jalali date. Click again (or tap the bubble) to clear.
               Text {
                 id: chartTip
-                visible: parent.hoverPoint !== null && parent.series.length >= 2
-                text: parent.hoverPoint
-                  ? (Model.jalaliLabel(parent.hoverPoint.ts) + "   " + Model.formatToman(parent.hoverPoint.toman) + " T")
+                visible: parent.activePoint !== null && parent.series.length >= 2
+                text: parent.activePoint
+                  ? (Model.jalaliLabel(parent.activePoint.ts) + "   " + Model.formatToman(parent.activePoint.toman) + " T")
                   : ""
                 color: root.bar.barForeground
                 font.family: root.bar.fontFamily
@@ -764,11 +762,23 @@ Panel {
               MouseArea {
                 anchors.fill: parent
                 acceptedButtons: Qt.LeftButton
-                onClicked: function (mx, my) {
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                // `mouse` is the single MouseEvent arg of clicked/positionChanged
+                // (a (x, y) signature would receive the event object as mx and
+                // break pointAtX). Hover follows the cursor; click pins.
+                onClicked: function (mouse) {
                   if (parent.series.length < 2) return
-                  var p = chart.pointAtX(mx)
+                  // canvas is inset by its anchors.margins; translate to
+                  // canvas-local x before mapping to the series.
+                  var p = chart.pointAtX(mouse.x - chart.x)
                   if (p) parent.hoverPoint = p
                 }
+                onPositionChanged: function (mouse) {
+                  if (parent.series.length < 2) return
+                  parent.previewPoint = chart.pointAtX(mouse.x - chart.x)
+                }
+                onExited: parent.previewPoint = null
               }
               Text {
                 visible: parent.series.length < 2
