@@ -102,6 +102,20 @@ omarchy plugin add ./omarchy-chand --enable
 omarchy bar move io.github.HACK3RRABBIT.chand --section right
 ```
 
+## Remove
+
+```bash
+omarchy plugin remove io.github.HACK3RRABBIT.chand
+```
+
+Then, if you had moved it on the bar, nothing else is needed — removing the
+plugin cleans up its bar entry.
+
+## Requirements
+
+External commands used at runtime: `curl` and `jq` (both preinstalled on
+Omarchy). No other dependencies; the plugin installs nothing system-wide.
+
 ## IPC
 
 ```bash
