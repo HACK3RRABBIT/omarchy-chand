@@ -25,9 +25,8 @@ rates in **Toman**, like the iOS app [Chand](https://apps.apple.com/us/app/chand
   and a converter on this screen only. **Tap the chart** to pin the price at that
   moment — a crosshair + dot mark it and a bubble shows the price and Jalali date;
   tap again to clear. Switching range only refetches the chart — it does not
-  reload the plugin. The selected range **persists** — close and
-  reopen the panel (or have another plugin installed/removed, which reloads
-  Chand) and your last chosen range is still selected.
+  reload the plugin. Closing the panel resets every chart back to **1D** and
+  reopening always lands on the watchlist.
 - **Catalog** — searchable, grouped add screen (Currencies / Gold & coins /
   Crypto). Already-added rows show a checkmark; tap adds and stays open for
   multi-add.
@@ -47,10 +46,12 @@ rates in **Toman**, like the iOS app [Chand](https://apps.apple.com/us/app/chand
   - **api.tgju.org** (TGJU first-party) — daily OHLC history back to 2012 for
     every TGJU asset, used for fiat/coin chart ranges.
 - No ECB / Yahoo / NIMA / SANA. No third-party TGJU proxy.
-- **State restore.** The last price snapshot and selected range are saved to
+- **State restore.** The last price snapshot is saved to
   `~/.cache/omarchy-chand/panel.json` and restored on load, so the bar pill and
   watchlist repaint instantly after a shell or plugin reload — no blank
-  prices while the network poll lands. A brand-new key's chart shows a small
+  prices while the network poll lands. Closing the panel resets the UI:
+  reopening lands on the watchlist with every chart at **1D**. A brand-new
+  key's chart shows a small
   animated spinner ("Collecting history…") while its first background warm
   builds the cache.
 - **Background caching (no on-demand chart fetching).** Every 5 minutes the
