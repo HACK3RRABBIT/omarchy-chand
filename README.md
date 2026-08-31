@@ -16,12 +16,15 @@ rates in **Toman**, like the iOS app [Chand](https://apps.apple.com/us/app/chand
 - **Watchlist** — scrollable list of assets you added; tap a row for Detail,
   `✕` removes just that row. (USD stays on the bar regardless — it is the locked
   primary.)
-- **Detail** — big Toman price, colored Δ% for the selected range (computed as
-  first-price → current-price from the chart, so it is never 0), the
-  "first → current" price pair in Toman, buy/sell (only when both exist and
-  differ), range chips (`1D 1W 1Y 5Y All`), an area chart (real movement from
-  cached history), a Jalali from→to summary (high / low), and a converter on
-  this screen only. Switching range only refetches the chart — it does not
+- **Detail** — big Toman price that **counts up** from its previous value when
+  it changes (animated, like it is loading), a colored Δ% for the selected
+  range (computed as first-price → current-price from the chart, so it is never
+  0), the "first → current" price pair in Toman, buy/sell (only when both exist
+  and differ), range chips (`1D 1W 1Y 5Y All` — default **1D**), an area chart
+  (real movement from cached history), a Jalali from→to summary (high / low),
+  and a converter on this screen only. **Tap the chart** to pin the price at that
+  moment — a crosshair + dot mark it and a bubble shows the price and Jalali date;
+  tap again to clear. Switching range only refetches the chart — it does not
   reload the plugin.
 - **Catalog** — searchable, grouped add screen (Currencies / Gold & coins /
   Crypto). Already-added rows show a checkmark; tap adds and stays open for

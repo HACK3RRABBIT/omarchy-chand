@@ -126,9 +126,22 @@ fetch_tgju() {
 # history cache (append-only, capped)
 # ---------------------------------------------------------------------------
 
+# Reject an obviously-wrong point (e.g. a stale raw-rial value 10x off the
+# prior point) so a transient bad fetch can't poison the intraday cache and make
+# 1d/1w charts spike. Tolerance: >3x the last point, and last point exists.
+last_toman() {
+  local f; f="$(cache_file "$1")"
+  [ -f "$f" ] || { printf ''; return; }
+  tail -n 1 "$f" 2>/dev/null | awk 'match($0,/"toman":([0-9.]+)/,m){print m[1]}'
+}
+
 append_history() {
   local key="$1" toman="$2" ts="$3"
   [ -z "$toman" ] && return
+  local prev; prev="$(last_toman "$key")"
+  if [ -n "$prev" ] && awk -v p="$prev" -v c="$toman" 'BEGIN{exit !((c>p*3)||(c<p/3))}'; then
+    return   # improbable jump -> skip to protect the series
+  fi
   local f; f="$(cache_file "$key")"
   printf '{"ts":%s,"toman":%s}\n' "$ts" "$toman" >>"$f" 2>/dev/null || return
   local lines; lines="$(wc -l <"$f" 2>/dev/null || echo 0)"

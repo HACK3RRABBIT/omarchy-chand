@@ -45,7 +45,7 @@ Panel {
   property string surface: "watchlist"
   property string selectedKey: ""
   property int cursor: 0
-  property string range: (cfg.range || "1y")
+  property string range: (cfg.range || "1d")
 
   // detail fetch state (one-shot; history file is appended by the poller too)
   property var detailState: null
@@ -78,6 +78,7 @@ Panel {
   function setRange(r) {
     if (root.range === r) return
     root.range = r
+    if (typeof chartBox !== "undefined" && chartBox) chartBox.hoverPoint = null
     if (root.selectedKey) root.fetchDetail(root.selectedKey, r)
   }
   function setPrimary(key) {
@@ -556,6 +557,7 @@ Panel {
 
           // ================= DETAIL =================
           Column {
+            id: detailCol
             visible: root.surface === "detail"
             width: parent.width
             spacing: Style.space(12)
@@ -573,9 +575,31 @@ Panel {
               width: parent.width
               elide: Text.ElideRight
             }
+            // Count-up animation: displayValue eases from its previous value
+            // toward the live Toman price whenever it changes, so the number
+            // ticks up/down like it is being loaded rather than snapping.
+            readonly property real liveToman: (parent.dSt && parent.dSt.ok) ? parent.dSt.toman : 0
+            readonly property real displayToman: priceAnim.value
+            NumberAnimation {
+              id: priceAnim
+              target: null
+              property: "value"
+              from: priceAnim.value
+              to: detailCol.liveToman
+              duration: 600
+              easing.type: Easing.OutCubic
+              running: false
+            }
+            onLiveTomanChanged: {
+              priceAnim.to = detailCol.liveToman
+              priceAnim.from = priceAnim.value
+              priceAnim.restart()
+            }
             Text {
               readonly property var s: parent.dSt
-              text: s && s.ok ? Model.formatToman(s.toman) + " Toman" : (s && s.ok === false ? "unavailable" : "…")
+              text: (parent.displayToman > 0)
+                ? Model.formatToman(parent.displayToman) + " Toman"
+                : (s && s.ok === false ? "unavailable" : "…")
               color: root.bar.barForeground
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.display
@@ -585,8 +609,8 @@ Panel {
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
                   var code = root.selectedKey ? (Model.catalogEntry(root.selectedKey) || {}).code : ""
-                  if (parent.s && parent.s.ok) {
-                    var txt = code + " " + Model.formatToman(parent.s.toman) + " Toman"
+                  if (detailCol.liveToman > 0) {
+                    var txt = code + " " + Model.formatToman(detailCol.liveToman) + " Toman"
                     root.bar.run("printf '%s' " + JSON.stringify(txt) + " | wl-copy")
                   }
                 }
@@ -689,6 +713,7 @@ Panel {
 
             // Chart (or collecting-history placeholder).
             Rectangle {
+              id: chartBox
               width: parent.width
               height: Style.space(120)
               radius: Style.cornerRadius
@@ -702,13 +727,48 @@ Panel {
               readonly property string rangeDir: (hist && hist.summary && hist.summary.points >= 2)
                 ? Model.direction(hist.summary.range_delta)
                 : ((root.detailState && root.detailState.ok) ? Model.direction(root.detailState.change_pct) : "flat")
+              // The point at the user's last click on the chart (or null).
+              property var hoverPoint: null
+
               ChartCanvas {
+                id: chart
                 anchors.fill: parent
                 anchors.margins: Style.space(4)
                 points: parent.series
                 color: root.dirColor(parent.rangeDir)
                 fill: Util.alpha(parent.color, 0.18)
+                hoverX: (parent.hoverPoint ? xAtPoint(parent.hoverPoint) : -1)
                 visible: parent.series.length >= 2
+              }
+              // Click anywhere on the chart to pin the price at that moment;
+              // the canvas draws a crosshair and this bubble shows the value +
+              // Jalali date. Click again (or tap the bubble) to clear.
+              Text {
+                id: chartTip
+                visible: parent.hoverPoint !== null && parent.series.length >= 2
+                text: parent.hoverPoint
+                  ? (Model.jalaliLabel(parent.hoverPoint.ts) + "   " + Model.formatToman(parent.hoverPoint.toman) + " T")
+                  : ""
+                color: root.bar.barForeground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+                horizontalAlignment: Text.AlignHCenter
+                width: parent.width - Style.space(8)
+                elide: Text.ElideMiddle
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.top: parent.top
+                anchors.topMargin: Style.space(4)
+                z: 2
+              }
+              MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton
+                onClicked: function (mx, my) {
+                  if (parent.series.length < 2) return
+                  var p = chart.pointAtX(mx)
+                  if (p) parent.hoverPoint = p
+                }
               }
               Text {
                 visible: parent.series.length < 2

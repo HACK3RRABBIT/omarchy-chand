@@ -22,12 +22,34 @@ Canvas {
   property real padX: 6
   property real padY: 6
 
+  // Hover marker: set hoverX (pixel, in this item's coords) to draw a vertical
+  // crosshair + dot at the nearest point; set to -1 to hide.
+  property real hoverX: -1
+
   readonly property int n: Array.isArray(root.points) ? root.points.length : 0
+
+  // Map a pixel x (canvas local) to the nearest data point {ts, toman}.
+  function pointAtX(px) {
+    if (root.n < 2) return null
+    var innerW = Math.max(1, root.width - root.padX * 2)
+    var i = Math.round(((px - root.padX) / innerW) * (root.n - 1))
+    if (i < 0) i = 0
+    if (i > root.n - 1) i = root.n - 1
+    return root.points[i]
+  }
+  function xAtPoint(p) {
+    if (root.n < 2) return root.padX
+    var innerW = Math.max(1, root.width - root.padX * 2)
+    var i = root.points.indexOf(p)
+    if (i < 0) i = 0
+    return root.padX + (innerW * i) / (root.n - 1)
+  }
 
   onPointsChanged: requestPaint()
   onColorChanged: requestPaint()
   onWidthChanged: requestPaint()
   onHeightChanged: requestPaint()
+  onHoverXChanged: requestPaint()
 
   antialiasing: true
   clip: true
@@ -75,5 +97,29 @@ Canvas {
     ctx.lineWidth = root.lineWidth
     ctx.lineJoin = "round"
     ctx.stroke()
+
+    // Hover crosshair + marker.
+    if (root.hoverX >= 0) {
+      var hp = root.pointAtX(root.hoverX)
+      if (hp) {
+        var hx = root.xAtPoint(hp)
+        var hy = yAt(Number(hp.toman))
+        ctx.save()
+        ctx.strokeStyle = Qt.darker(root.color, 1.0)
+        ctx.globalAlpha = 0.5
+        ctx.setLineDash([3, 3])
+        ctx.beginPath()
+        ctx.moveTo(hx, py)
+        ctx.lineTo(hx, h - py)
+        ctx.stroke()
+        ctx.setLineDash([])
+        ctx.globalAlpha = 1
+        ctx.fillStyle = root.color
+        ctx.beginPath()
+        ctx.arc(hx, hy, 3.5, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.restore()
+      }
+    }
   }
 }
