@@ -31,6 +31,7 @@ Panel {
 
   property var anchorItem: null
   property var hostWidget: null
+  onHostWidgetChanged: root.pushPrimaryToHost()
   readonly property var barIdentity: hostWidget || root
 
   // Absolute path to the bundled fetch script. Quickshell's Process does not
@@ -71,13 +72,13 @@ Panel {
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
       root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
-  // Range is in-memory only. Previously this called persist()/updateEntryInline
-  // on every chip tap, which reloaded the whole plugin (the panel shook and the
-  // pill flickered to "Chand" while settings reinitialized). Range does NOT need
-  // to be persisted, so we just switch it and refetch the chart for this key.
+  // Range persists to the cache state file (NOT via updateEntryInline — that
+  // reloads the whole plugin: the panel shakes and the pill flickers). It
+  // survives close/reopen and plugin reloads without touching settings.
   function setRange(r) {
     if (root.range === r) return
     root.range = r
+    root.persistState()
     if (typeof chartBox !== "undefined" && chartBox) chartBox.hoverPoint = null
     if (root.selectedKey) root.fetchDetail(root.selectedKey, r)
   }
@@ -97,6 +98,12 @@ Panel {
 
   // ---- panel open/close (mirrors weather Panel) ----
   function open() {
+    // Reopening always lands on the watchlist ("menu"), even if the panel was
+    // closed while on the Detail or Catalog surface.
+    root.surface = "watchlist"
+    root.selectedKey = ""
+    root.cursor = 0
+    root.detailState = null
     root.controller.show()
     root.refresh()
   }
@@ -183,6 +190,58 @@ Panel {
   // for the detail key.
   property var snapshot: ({})        // key -> latest current item
 
+  // Persisted UI state (last snapshot + selected range) so a shell/plugin
+  // reload — installing or removing ANY plugin reloads every local plugin —
+  // restores prices and the chart range instantly instead of blanking until
+  // the next network poll.
+  property FileView stateFile: FileView {
+    path: Quickshell.env("HOME") + "/.cache/omarchy-chand/panel.json"
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.restoreState()
+  }
+  property var pendingPrimary: null
+
+  function persistState() {
+    try {
+      stateFile.setText(JSON.stringify({
+        ts: Math.floor(Date.now() / 1000),
+        range: root.range,
+        snapshot: root.snapshot
+      }) + "\n")
+    } catch (e) {}
+  }
+
+  function restoreState() {
+    try {
+      var raw = String(stateFile.text() || "").trim()
+      if (!raw) return
+      var st = JSON.parse(raw)
+      var ok = { "1d": true, "1w": true, "1m": true, "1y": true, "5y": true, "all": true }
+      // Keep the user's last selected range across close/reopen (fresh installs start at 1d).
+      if (st.range && ok[st.range]) root.range = st.range
+      // Restore the last price snapshot so rows and the bar pill repaint
+      // immediately after any plugin reload, before the network lands.
+      if (st.snapshot && typeof st.snapshot === "object") {
+        root.snapshot = st.snapshot
+        var pk = cfg.primary || "price_dollar_rl"
+        if (st.snapshot[pk]) {
+          root.pendingPrimary = st.snapshot[pk]
+          root.pushPrimaryToHost()
+        }
+      }
+    } catch (e) {}
+  }
+
+  function pushPrimaryToHost() {
+    if (!root.pendingPrimary) return
+    if (root.hostWidget && typeof root.hostWidget.setPrimaryState === "function") {
+      root.hostWidget.setPrimaryState(root.pendingPrimary)
+      root.pendingPrimary = null
+    }
+  }
+
   function refresh() {
     var keys = []
     if (cfg.primary) keys.push(cfg.primary)
@@ -221,6 +280,7 @@ Panel {
               if (it && it.key) snap[it.key] = it
             }
             root.snapshot = snap
+            root.persistState()
             // Mirror the primary into the bar pill.
             if (snap[cfg.primary] && root.hostWidget && typeof root.hostWidget.setPrimaryState === "function")
               root.hostWidget.setPrimaryState(snap[cfg.primary])
@@ -674,7 +734,7 @@ Panel {
             Flow {
               width: parent.width
               spacing: Style.space(6)
-              property var ranges: ["1D", "1W", "1Y", "5Y", "All"]
+              property var ranges: ["1D", "1W", "1M", "1Y", "5Y", "All"]
               Repeater {
                 model: parent.ranges
                 Rectangle {
@@ -697,7 +757,7 @@ Panel {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
-                      var map = { "1D": "1d", "1W": "1w", "1Y": "1y", "5Y": "5y", "All": "all" }
+                      var map = { "1D": "1d", "1W": "1w", "1M": "1m", "1Y": "1y", "5Y": "5y", "All": "all" }
                       root.setRange(map[modelData])
                     }
                   }
@@ -780,14 +840,54 @@ Panel {
                 }
                 onExited: parent.previewPoint = null
               }
-              Text {
+              // Loading state for a chart with no cached series yet (e.g. a
+              // brand-new watchlist key warming in the background): a small
+              // rotating arc + pulsing label, in the spirit of omarchy-fast.
+              Column {
+                id: chartLoading
                 visible: parent.series.length < 2
                 anchors.centerIn: parent
-                text: "Collecting history…"
-                color: Qt.darker(root.bar.barForeground, 1.5)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.italic: true
+                spacing: Style.space(6)
+                Canvas {
+                  id: chartSpinner
+                  width: 20
+                  height: 20
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  property real angle: 0
+                  onAngleChanged: requestPaint()
+                  onPaint: {
+                    var ctx = getContext("2d")
+                    ctx.clearRect(0, 0, width, height)
+                    ctx.strokeStyle = Qt.darker(root.bar.barForeground, 1.4)
+                    ctx.lineWidth = 2.5
+                    ctx.lineCap = "round"
+                    ctx.beginPath()
+                    ctx.arc(width / 2, height / 2, 7.5,
+                            angle * Math.PI / 180, (angle + 250) * Math.PI / 180)
+                    ctx.stroke()
+                  }
+                  RotationAnimation on angle {
+                    from: 0
+                    to: 360
+                    duration: 1000
+                    loops: Animation.Infinite
+                    running: chartLoading.visible
+                  }
+                }
+                Text {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: "Collecting history…"
+                  color: Qt.darker(root.bar.barForeground, 1.5)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.italic: true
+                  SequentialAnimation on opacity {
+                    loops: Animation.Infinite
+                    running: chartLoading.visible
+                    NumberAnimation { to: 0.35; duration: 700; easing.type: Easing.InOutQuad }
+                    NumberAnimation { to: 1.0; duration: 700; easing.type: Easing.InOutQuad }
+                  }
+                }
               }
             }
 

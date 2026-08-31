@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.HACK3RRABBIT.chand",
   "name": "Chand",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "author": "HACK3RRABBIT",
   "description": "Iran free-market rates (Toman) on the Omarchy bar — like the Chand iOS app. USD, EUR, gold, coins, and crypto, with a watchlist, detail chart, and converter.",
   "license": "MIT",

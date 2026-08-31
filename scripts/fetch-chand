@@ -33,7 +33,7 @@ CACHE_DIR="${CHAND_CACHE_DIR:-$HOME/.cache/omarchy-chand}"
 HISTORY_DIR="$CACHE_DIR/history"
 CHARTS_DIR="$CACHE_DIR/charts"
 MAX_POINTS=8000
-RANGES=(1d 1w 1y 5y all)
+RANGES=(1d 1w 1m 1y 5y all)
 EPOCH_FLOOR=946684800   # 2000-01-01: bounds "all" and avoids negative epochs
 
 mkdir -p "$HISTORY_DIR" "$CHARTS_DIR" 2>/dev/null || true
@@ -316,7 +316,7 @@ cmd_current() {
 
 range_days() {
   case "$1" in
-    1d) echo 1;; 1w) echo 7;; 1y) echo 365;; 5y) echo 1825;; all) echo 36500;;
+    1d) echo 1;; 1w) echo 7;; 1m) echo 30;; 1y) echo 365;; 5y) echo 1825;; all) echo 36500;;
     *) echo 30;;
   esac
 }
@@ -327,6 +327,7 @@ range_res() {
   case "$1" in
     1d) echo 60;;   # hourly -> ~24 pts/day
     1w) echo 60;;   # hourly -> ~168 pts/week
+    1m) echo 60;;   # hourly -> ~720 pts/month
     1y) echo D;;    # daily  -> ~365 pts/year
     5y) echo D;;    # daily  -> ~1812 pts/5y
     all) echo D;;   # daily  -> ~2754 pts/all
@@ -413,7 +414,7 @@ build_series() {
 
   # Intraday supplement for TGJU assets on short ranges: daily rows only give
   # one point per day, so splice in the 5-minute local cache points.
-  if [ "$src" = "tgju" ] && { [ "$range" = "1d" ] || [ "$range" = "1w" ]; }; then
+  if [ "$src" = "tgju" ] && { [ "$range" = "1d" ] || [ "$range" = "1w" ] || [ "$range" = "1m" ]; }; then
     local f; f="$(cache_file "$key")"
     if [ -f "$f" ]; then
       local localpts
@@ -556,5 +557,5 @@ case "${1:-}" in
   current) shift; cmd_current "$@";;
   history) cmd_history "${2:-}" "${3:-1y}";;
   warm)    shift; cmd_warm "$@";;
-  *) die "usage: fetch-chand current <key>... | history <key> [1d|1w|1y|5y|all] | warm <key>...";;
+  *) die "usage: fetch-chand current <key>... | history <key> [1d|1w|1m|1y|5y|all] | warm <key>...";;
 esac
