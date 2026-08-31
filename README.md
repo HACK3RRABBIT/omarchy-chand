@@ -1,5 +1,9 @@
 # Chand — Iran free-market rates on the Omarchy bar
 
+<p align="center">
+  <img src="preview.png" alt="Chand bar pill and watchlist panel" width="480">
+</p>
+
 A first-party-quality Omarchy Quattro bar widget that shows Iran's free-market
 rates in **Toman**, like the iOS app [Chand](https://apps.apple.com/us/app/chand/id1524200188).
 
