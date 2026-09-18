@@ -131,7 +131,16 @@ Panel {
     else root.openFromHotkey()
   }
   function setCenterHoverRevealSuppressed(value) {
-    if (root.bar && "centerHoverRevealSuppressed" in root.bar)
+    if (!root.bar) return
+    // Current Omarchy shell exposes this through a read-only facade
+    // (Ui/PluginBarApi.qml) for third-party plugins — writing the property
+    // directly throws "Cannot assign to read-only property" on every call
+    // and was observed to wedge panel input until the plugin was disabled.
+    // Prefer the setter method; fall back to the old direct assignment only
+    // if a shell build doesn't expose the method (older Omarchy).
+    if (typeof root.bar.setCenterHoverRevealSuppressed === "function")
+      root.bar.setCenterHoverRevealSuppressed(value)
+    else if ("centerHoverRevealSuppressed" in root.bar)
       root.bar.centerHoverRevealSuppressed = value
   }
 
