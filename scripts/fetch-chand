@@ -109,17 +109,35 @@ fetch_wallex() {
   # Wallex sometimes prepends a stray NUL byte; command substitution strips
   # NULs, which corrupts the JSON and breaks every path that funnels the
   # payload through the shell. Strip it up front.
-  WALLEX_RAW="$(curl -fsS --max-time 12 -A "$UA" "$WALLEX_URL" 2>/dev/null | tr -d '\000')" || return 1
-  printf '%s' "$WALLEX_RAW" | jq -e '.result.symbols' >/dev/null 2>&1 || return 1
-  return 0
+  # One retry: a bare 12s attempt was observed to fail ~1 in 5 polls against
+  # this upstream (transient TLS/connect hiccup, not a real outage) — a
+  # second attempt after a short pause clears it without meaningfully
+  # slowing the background poller.
+  local attempt
+  for attempt in 1 2; do
+    WALLEX_RAW="$(curl -fsS --compressed --max-time 15 -A "$UA" "$WALLEX_URL" 2>/dev/null | tr -d '\000')"
+    if [ -n "$WALLEX_RAW" ] && printf '%s' "$WALLEX_RAW" | jq -e '.result.symbols' >/dev/null 2>&1; then
+      return 0
+    fi
+    [ "$attempt" = 1 ] && sleep 1
+  done
+  WALLEX_RAW=""
+  return 1
 }
 
 TGJU_RAW=""
 fetch_tgju() {
   [ -n "$TGJU_RAW" ] && return 0
-  TGJU_RAW="$(curl -fsS --max-time 12 -A "$UA" "$TGJU_URL" 2>/dev/null)" || return 1
-  printf '%s' "$TGJU_RAW" | jq -e '.current' >/dev/null 2>&1 || return 1
-  return 0
+  local attempt
+  for attempt in 1 2; do
+    TGJU_RAW="$(curl -fsS --compressed --max-time 15 -A "$UA" "$TGJU_URL" 2>/dev/null)"
+    if [ -n "$TGJU_RAW" ] && printf '%s' "$TGJU_RAW" | jq -e '.current' >/dev/null 2>&1; then
+      return 0
+    fi
+    [ "$attempt" = 1 ] && sleep 1
+  done
+  TGJU_RAW=""
+  return 1
 }
 
 # ---------------------------------------------------------------------------
